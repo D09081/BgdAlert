@@ -152,12 +152,17 @@ function formatFeedItem(msg) {
   };
 }
 
+// Типы сообщений, которые реально относятся к тревогам/БПЛА/укрытиям —
+// всё остальное (общие посты канала не по теме) в ленту не попадает.
+const ALERT_TYPES = ['rocket', 'drone', 'cancel', 'shelter', 'repeat'];
+
 // ===== Основной цикл опроса =====
 async function pollOnce() {
   try {
     const raw = await fetchChannelMessages();
     const fresh = raw.filter((m) => !isAd(m.text));
-    const items = fresh.map(formatFeedItem).sort((a, b) => b.ts - a.ts);
+    const allItems = fresh.map(formatFeedItem).sort((a, b) => b.ts - a.ts);
+    const items = allItems.filter((it) => ALERT_TYPES.includes(it.t));
 
     const seen = new Set(state.seenIds);
     const newItems = items.filter((it) => !seen.has(String(it.id)));
@@ -172,7 +177,9 @@ async function pollOnce() {
     }
 
     state.feed = items.slice(0, 60); // храним последние 60 сообщений
-    state.seenIds = items.slice(0, 200).map((it) => String(it.id));
+    // seenIds строим по ВСЕМ сообщениям канала (включая нерелевантные),
+    // чтобы off-topic посты не пересчитывались и не «просачивались» после правок фильтра
+    state.seenIds = allItems.slice(0, 200).map((it) => String(it.id));
     saveJson(STATE_FILE, state);
     lastPollOk = true;
     lastPollAt = Date.now();
