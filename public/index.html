@@ -816,13 +816,41 @@ function setRegion(region, btn) {
   updateStatusFromFeed();
 }
 
+// ===== Сохранение настроек звука/вибрации/районов между запусками =====
+var PREFS_KEY = 'trevogaPushPrefs';
+function savePrefsToStorage() {
+  try {
+    var soundOn = document.getElementById('swSound').classList.contains('on');
+    var vibroOn = document.getElementById('swVibro').classList.contains('on');
+    var regions = Array.from(document.querySelectorAll('.region-push-row .switch.on'))
+      .map(function(s) { return s.getAttribute('data-region'); });
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ sound: soundOn, vibro: vibroOn, regions: regions }));
+  } catch (e) { /* localStorage недоступен (приватный режим) — не критично */ }
+}
+function loadPrefsFromStorage() {
+  try {
+    var raw = localStorage.getItem(PREFS_KEY);
+    if (!raw) return;
+    var prefs = JSON.parse(raw);
+    document.getElementById('swSound').classList.toggle('on', !!prefs.sound);
+    document.getElementById('swVibro').classList.toggle('on', !!prefs.vibro);
+    if (Array.isArray(prefs.regions)) {
+      document.querySelectorAll('.region-push-row .switch').forEach(function(sw) {
+        sw.classList.toggle('on', prefs.regions.indexOf(sw.getAttribute('data-region')) !== -1);
+      });
+      pushRegionsSelected = prefs.regions;
+    }
+  } catch (e) {}
+}
+
 function openModal() { document.getElementById('modal').classList.add('show'); }
 function closeModal() { document.getElementById('modal').classList.remove('show'); }
-function toggleSwitch(el) { el.classList.toggle('on'); }
+function toggleSwitch(el) { el.classList.toggle('on'); savePrefsToStorage(); }
 
-// Переключатель района в пуш-настройках: ВКЛ автоматически применяет
-// этот район как основной фильтр ленты и закрывает окно, чтобы сразу
-// показать отфильтрованную ленту.
+// Переключатель района в пуш-настройках: ВКЛ сразу применяет этот район
+// как фильтр ленты (видно уже под окном), но окно НЕ закрывается —
+// иначе настройки звука/вибрации, выставленные до этого, терялись,
+// так как пользователь не успевал дойти до кнопки «Включить уведомления».
 function toggleRegionSwitch(el) {
   el.classList.toggle('on');
   var region = el.getAttribute('data-region');
@@ -830,9 +858,8 @@ function toggleRegionSwitch(el) {
     .map(function(s) { return s.getAttribute('data-region'); });
   if (el.classList.contains('on')) {
     setRegion(region, null);
-    toast('📍', 'Район выбран', 'Лента отфильтрована: ' + (regionNames[region] || region));
-    closeModal();
   }
+  savePrefsToStorage();
 }
 
 async function savePush() {
@@ -873,6 +900,7 @@ async function savePush() {
     });
 
     document.getElementById('bellBtn').classList.add('on');
+    savePrefsToStorage();
     closeModal();
     toast('🔔', 'Уведомления включены', 'Районы: ' + pushRegionsSelected.map(function(r) { return regionNames[r] || r; }).join(', '));
   } catch (err) {
@@ -979,6 +1007,7 @@ function initHandlers() {
   if (hideBtn) hideBtn.addEventListener('click', hideInstallHint);
 }
 initHandlers();
+loadPrefsFromStorage();
 
 // ===== Start polling the real parser every 10 seconds =====
 fetchFeed();
