@@ -244,6 +244,7 @@
   .feed-ico.shelter { background: rgba(59,130,246,0.1); }
   .feed-ico.repeat { background: rgba(168,85,247,0.1); }
   .feed-ico.other { background: rgba(163,163,163,0.1); }
+  .feed-ico.admin { background: rgba(168,85,247,0.12); }
   .feed-body { flex: 1; min-width: 0; }
   .feed-tag {
     font-size: 11px; font-weight: 700; text-transform: uppercase;
@@ -255,6 +256,7 @@
   .feed-tag.shelter { color: var(--blue); }
   .feed-tag.repeat { color: var(--purple); }
   .feed-tag.other { color: var(--text-secondary); }
+  .feed-tag.admin { color: var(--purple); }
   .feed-text { font-size: 14px; line-height: 1.5; color: var(--text); word-break: break-word; }
   .feed-meta {
     display: flex; align-items: center; gap: 8px;
@@ -668,7 +670,7 @@ const API_BASE = '';
 var regionNames = {
   'belgorod': 'Белгород', 'valuiki': 'Валуйки', 'shebekino': 'Шебекино',
   'graivoron': 'Грайворон', 'stary-oskol': 'Старый Оскол', 'gubkin': 'Губкин',
-  'korocha': 'Короча', 'krasnaya-yaruga': 'Красная Яруга'
+  'korocha': 'Короча', 'krasnaya-yaruga': 'Красная Яруга', 'all': 'По всей области'
 };
 
 var filter = 'all', regionFilter = 'all';
@@ -750,7 +752,7 @@ function render() {
   list.innerHTML = '';
   var data = feed.filter(function(x) {
     var typeMatch = filter === 'all' || x.t === filter;
-    var regionMatch = regionFilter === 'all' || x.region === regionFilter;
+    var regionMatch = regionFilter === 'all' || x.region === regionFilter || x.region === 'all';
     return typeMatch && regionMatch;
   });
   data.forEach(function(item) {
@@ -758,12 +760,13 @@ function render() {
     el.className = 'feed-item' + (item.isNew ? ' new' : '');
     var regionBadge = item.region && item.region !== 'belgorod' ?
       '<span class="feed-region">' + (regionNames[item.region] || item.region) + '</span>' : '';
+    var manualBadge = item.manual ? '<span class="feed-region" style="background:rgba(168,85,247,0.15);color:var(--purple);">вручную</span>' : '';
     var timeTitle = item.iso ? ' title="' + item.iso + '"' : '';
     var timeNote = item.hasRealTime === false ? ' <span style="opacity:.6">(время сервера)</span>' : '';
     el.innerHTML =
       '<div class="feed-ico ' + item.t + '">' + item.i + '</div>' +
       '<div class="feed-body">' +
-      '<div class="feed-tag ' + item.t + '">' + item.tag + regionBadge + '</div>' +
+      '<div class="feed-tag ' + item.t + '">' + item.tag + regionBadge + manualBadge + '</div>' +
       '<div class="feed-text">' + item.txt + '</div>' +
       '<div class="feed-meta"' + timeTitle + '>' +
       '<span class="feed-dot ' + (item.isNew ? 'pulse' : '') + '"></span>' +
@@ -778,7 +781,7 @@ function render() {
 
 function updateStatusFromFeed() {
   var relevant = feed.filter(function(x) {
-    return regionFilter === 'all' || x.region === regionFilter;
+    return regionFilter === 'all' || x.region === regionFilter || x.region === 'all';
   });
   var latest = relevant.find(function(x) { return x.t === 'rocket' || x.t === 'drone' || x.t === 'cancel'; });
   var card = document.getElementById('statusCard');
