@@ -40,8 +40,20 @@ if (!ADMIN_PASSWORD) {
   console.log('    ADMIN_PASSWORD=' + ADMIN_PASSWORD);
   console.log('    Зафиксируйте свой постоянный пароль в переменных окружения для продакшена.\n');
 }
-const adminSessions = new Map(); // token -> expiresAt (ms)
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 часов
+// Сессии администратора раньше жили только в памяти процесса — на хостингах,
+// которые перезапускают/«усыпляют» Node-процесс (Render free tier и т.п.),
+// это молча разлогинивало админа, хотя токен в браузере оставался. Теперь
+// сессии сохраняются на диск и переживают перезапуск сервера.
+const SESSIONS_FILE = path.join(DATA_DIR, 'admin-sessions.json');
+const adminSessions = new Map(Object.entries(loadJson(SESSIONS_FILE, {})));
+// подчищаем протухшие сессии сразу при старте
+for (const [token, expiresAt] of adminSessions) {
+  if (expiresAt < Date.now()) adminSessions.delete(token);
+}
+function saveSessions() {
+  saveJson(SESSIONS_FILE, Object.fromEntries(adminSessions));
+}
 
 // ===== VAPID (ключи для Web Push) =====
 // Сгенерируйте свои командой: npx web-push generate-vapid-keys
@@ -73,6 +85,14 @@ let subscriptions = loadJson(SUBS_FILE, []); // [{ subscription, regions, sound,
 let state = loadJson(STATE_FILE, { seenIds: [], feed: [] });
 let channels = loadJson(CHANNELS_FILE, ['mchs31', 'LiveOnlain']);
 if (!fs.existsSync(CHANNELS_FILE)) saveJson(CHANNELS_FILE, channels);
+
+// Некоторые каналы освещают события только конкретного города (например, канал
+// «Предупреждение» пишет исключительно про город Белгород) — для них региональные
+// ключевые слова из текста поста не нужны и могут ошибочно перекидывать сообщение
+// в другой район. Админ может закрепить фиксированный регион за таким каналом.
+const CHANNEL_REGIONS_FILE = path.join(DATA_DIR, 'channel-regions.json');
+let channelRegionOverride = loadJson(CHANNEL_REGIONS_FILE, {}); // { channelName: 'belgorod' | ... }
+if (!fs.existsSync(CHANNEL_REGIONS_FILE)) saveJson(CHANNEL_REGIONS_FILE, channelRegionOverride);
 
 const ALARM_CONFIG_FILE = path.join(DATA_DIR, 'alarm-config.json');
 // Какие типы сообщений и для каких районов включают ГРОМКОЕ push-уведомление
@@ -118,15 +138,22 @@ setInterval(() => {
 }, 5000);
 
 // ===== Классификация сообщений =====
+// ВАЖНО: 'belgorod' проверяется ПЕРВЫМ и намеренно самый широкий (город + область
+// в целом) — большинство сообщений общего канала-предупреждения относятся именно
+// к городу Белгород / области целиком, а не к конкретному району.
+// Остальные ключевые слова раньше были слишком общими (например, 'красн' совпадал
+// с любым словом, содержащим эти буквы, а не только с «Красной Яругой») — из-за
+// этого случайные сообщения без упоминания района ошибочно попадали в конкретный
+// район. Теперь используются точные фразы вместо расплывчатых подстрок.
 const REGION_KEYWORDS = [
-  ['belgorod', ['белгород', 'белгороду', 'белгородской']],
+  ['belgorod', ['белгород', 'белгороду', 'белгородской', 'белгородский', 'белгородском', 'белгородская', 'по области', 'области']],
   ['valuiki', ['валуйк']],
   ['shebekino', ['шебекин']],
   ['graivoron', ['грайворон']],
   ['stary-oskol', ['старый оскол', 'старом осколе', 'старооскольск']],
   ['gubkin', ['губкин']],
   ['korocha', ['короч']],
-  ['krasnaya-yaruga', ['красн', 'яруг']],
+  ['krasnaya-yaruga', ['красная яруга', 'красной яруге', 'красноярружск']],
 ];
 
 const REGION_NAMES = {
@@ -149,11 +176,35 @@ function detectRegion(text) {
   return 'belgorod'; // канал в целом про область — по умолчанию центр
 }
 
+// Общие формулировки вида «Большая активность БПЛА. Будьте бдительны. Берегите себя.» —
+// это ситуативное предупреждение о фоновой обстановке, а не сигнал «БПЛА над вами прямо
+// сейчас». Поднимать по нему тревогу (звук/вибрация/красный статус) не нужно — но и
+// выкидывать из ленты не стоит, показываем как обычное информационное сообщение.
+const GENERAL_CAUTION_RE = /будьте бдительны|берегите себя|сохраняйте спокойствие/i;
+const DIRECT_THREAT_RE = /обнаружен|зафиксирован|курс[ыа]?\s+на|направля(ется|ются)|над\s|заход[ит]*|атак|сбит|поражен|подлета|приближа/i;
+
 function classify(text) {
   const lower = text.toLowerCase();
   if (/отбой/.test(lower)) return { t: 'cancel', i: '✅', tag: 'Отбой / отмена' };
-  if (/ракетн(ая|ой) опасност/.test(lower)) return { t: 'rocket', i: '🚀', tag: 'Ракетная опасность' };
-  if (/бпла|беспилотник|дрон/.test(lower)) return { t: 'drone', i: '🛸', tag: 'БПЛА обнаружен' };
+
+  // Ракетная опасность (в т.ч. пуски/удары с самолётов противника — приравниваем к РО,
+  // это тот же уровень угрозы и та же реакция «в укрытие»).
+  if (/ракетн(ая|ой) опасност/.test(lower)) {
+    return { t: 'rocket', i: '🚀', tag: 'Ракетная опасность' };
+  }
+  if (/(пуск\w*|удар\w*)[^.!?\n]{0,25}(самол[её]та?|авиац\w*)\s+противника/.test(lower) ||
+      /авиац(ия|ионн\w*)[^.!?\n]{0,25}(противника|опасност\w*|удар\w*)/.test(lower)) {
+    return { t: 'rocket', i: '✈️', tag: 'Авиационная опасность' };
+  }
+
+  if (/бпла|беспилотник|дрон/.test(lower)) {
+    const isGeneralNotice = GENERAL_CAUTION_RE.test(lower) && !DIRECT_THREAT_RE.test(lower);
+    if (isGeneralNotice) {
+      return { t: 'notice', i: 'ℹ️', tag: 'Активность БПЛА в регионе' };
+    }
+    return { t: 'drone', i: '🛸', tag: 'БПЛА обнаружен' };
+  }
+
   if (/укрыти/.test(lower)) return { t: 'shelter', i: '🏃', tag: 'В укрытие' };
   if (/повторн/.test(lower)) return { t: 'repeat', i: '💬', tag: 'Повторно' };
   return { t: 'other', i: '📰', tag: 'Сообщение канала' };
@@ -267,7 +318,7 @@ async function fetchChannelMessages(channel) {
 
 function formatFeedItem(msg) {
   const cls = classify(msg.text);
-  const region = detectRegion(msg.text);
+  const region = channelRegionOverride[msg.channel] || detectRegion(msg.text);
   const hasRealTime = !!msg.datetime;
   const dt = hasRealTime ? new Date(msg.datetime) : new Date();
   const time = dt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
@@ -327,7 +378,7 @@ function dedupeItems(items) {
 
 // Типы сообщений, которые реально относятся к тревогам/БПЛА/укрытиям —
 // всё остальное (общие посты канала не по теме) в ленту не попадает.
-const ALERT_TYPES = ['rocket', 'drone', 'cancel', 'shelter', 'repeat'];
+const ALERT_TYPES = ['rocket', 'drone', 'cancel', 'shelter', 'repeat', 'notice'];
 
 // ===== Основной цикл опроса (сразу по всем каналам-источникам) =====
 async function pollOnce() {
@@ -389,15 +440,18 @@ async function notifySubscribers(item) {
   const title = isUrgent ? `🚨 ТРЕВОГА · ${regionLabel}` : `${item.i} ${item.tag}`;
   const body = item.txt;
 
-  const payload = JSON.stringify({
-    title, body, tag: 'trevoga-' + item.id,
-    urgent: isUrgent, url: './'
-  });
-
   const stillValid = [];
   for (const entry of subscriptions) {
     const matches = item.region === 'all' || (entry.regions && entry.regions.includes(item.region));
     if (!matches) { stillValid.push(entry); continue; }
+    // Каждый подписчик сам решает, нужен ли ему звук/вибрация при тревоге —
+    // раньше сервер слал всем один и тот же payload и игнорировал entry.sound/entry.vibro.
+    const payload = JSON.stringify({
+      title, body, tag: 'trevoga-' + item.id,
+      urgent: isUrgent, url: './',
+      sound: entry.sound !== false,
+      vibro: entry.vibro !== false
+    });
     try {
       await webpush.sendNotification(entry.subscription, payload);
       stillValid.push(entry);
@@ -469,6 +523,7 @@ function requireAdmin(req, res, next) {
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
   const expiresAt = token && adminSessions.get(token);
   if (!expiresAt || expiresAt < Date.now()) {
+    if (token && expiresAt) { adminSessions.delete(token); saveSessions(); }
     return res.status(401).json({ error: 'unauthorized' });
   }
   next();
@@ -481,6 +536,7 @@ app.post('/api/admin/login', (req, res) => {
   }
   const token = crypto.randomBytes(24).toString('hex');
   adminSessions.set(token, Date.now() + SESSION_TTL_MS);
+  saveSessions();
   res.json({ token, expiresIn: SESSION_TTL_MS });
 });
 
@@ -525,7 +581,26 @@ app.get('/api/admin/stats', requireAdmin, (req, res) => {
 
 // ===== Управление источниками (каналами) =====
 app.get('/api/admin/channels', requireAdmin, (req, res) => {
-  res.json({ channels, channelHealth });
+  res.json({ channels, channelHealth, channelRegions: channelRegionOverride });
+});
+
+// Закрепить (или снять) фиксированный регион за каналом — например, канал,
+// который пишет только про сам город Белгород, не нужно классифицировать
+// по ключевым словам из текста.
+app.post('/api/admin/channel-region', requireAdmin, (req, res) => {
+  const parsed = parseChannelInput((req.body || {}).channel);
+  const region = (req.body || {}).region;
+  if (!parsed) return res.status(400).json({ error: 'invalid channel' });
+  if (!channels.includes(parsed)) return res.status(404).json({ error: 'unknown channel' });
+  if (!region || region === 'auto') {
+    delete channelRegionOverride[parsed];
+  } else if (REGION_NAMES[region] || region === 'all') {
+    channelRegionOverride[parsed] = region;
+  } else {
+    return res.status(400).json({ error: 'invalid region' });
+  }
+  saveJson(CHANNEL_REGIONS_FILE, channelRegionOverride);
+  res.json({ ok: true, channelRegions: channelRegionOverride });
 });
 
 app.post('/api/admin/channels', requireAdmin, (req, res) => {
@@ -569,6 +644,7 @@ const TYPE_META = {
   cancel: { i: '✅', tag: 'Отбой / отмена' },
   shelter: { i: '🏃', tag: 'В укрытие' },
   repeat: { i: '💬', tag: 'Повторно' },
+  notice: { i: 'ℹ️', tag: 'Информационное сообщение' },
   admin: { i: '📢', tag: 'Сообщение администрации' }
 };
 
