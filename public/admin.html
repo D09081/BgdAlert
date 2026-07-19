@@ -13,7 +13,8 @@
     --accent: #ef4444; --accent-soft: rgba(239,68,68,0.12);
     --green: #22c55e; --yellow: #eab308; --blue: #3b82f6; --purple: #a855f7;
   }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  * { margin: 0; padding: 0; box-sizing: border-box; min-width: 0; }
+  html, body { max-width: 100%; overflow-x: hidden; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     background: var(--bg); color: var(--text); min-height: 100vh;
@@ -41,18 +42,29 @@
   .btn.small { width: auto; padding: 9px 16px; font-size: 13px; }
   .error-msg { color: var(--accent); font-size: 13px; margin-top: 10px; min-height: 16px; }
 
-  #dashboard { display: none; padding: 20px; max-width: 1100px; margin: 0 auto; }
-  .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
-  .top-bar h1 { font-size: 20px; display: flex; align-items: center; gap: 8px; }
-  .conn-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 5px 12px; }
-  .conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+  #dashboard { display: none; padding: 16px; max-width: 1100px; margin: 0 auto; width: 100%; }
+  .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; flex-wrap: wrap; gap: 12px; }
+  .top-bar h1 { font-size: 18px; display: flex; align-items: center; gap: 8px; }
+  .conn-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 5px 12px; white-space: nowrap; }
+  .conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
   .conn-dot.off { background: var(--accent); }
 
-  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px; }
-  .stat-card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 18px;
+  /* ===== Вкладки ===== */
+  .tabs { display: flex; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; margin-bottom: 18px; padding-bottom: 4px; scrollbar-width: thin; }
+  .tab-btn {
+    flex-shrink: 0; padding: 9px 14px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text-secondary); font-size: 13px; font-weight: 600;
+    cursor: pointer; white-space: nowrap;
   }
-  .stat-card .num { font-size: 28px; font-weight: 800; letter-spacing: -0.5px; }
+  .tab-btn.active { background: var(--accent-soft); border-color: rgba(239,68,68,0.4); color: var(--text); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .stat-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 16px; min-width: 0;
+  }
+  .stat-card .num { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
   .stat-card .label { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
 
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
@@ -60,18 +72,20 @@
 
   .panel {
     background: var(--surface); border: 1px solid var(--border); border-radius: 18px;
-    padding: 20px; margin-bottom: 16px;
+    padding: 18px; margin-bottom: 16px; min-width: 0;
   }
-  .panel h2 { font-size: 15px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
-  .panel canvas { max-height: 240px; }
+  .panel h2 { font-size: 14px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .panel .chart-box { position: relative; height: 220px; }
+  .panel .chart-box canvas { max-width: 100%; }
 
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; color: var(--text-secondary); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; }
-  td { padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.03); color: var(--text); }
+  .table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 520px; }
+  th { text-align: left; color: var(--text-secondary); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; white-space: nowrap; }
+  td { padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.03); color: var(--text); max-width: 220px; overflow-wrap: break-word; }
   tr:last-child td { border-bottom: none; }
 
   .bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 13px; }
-  .bar-row .bar-label { width: 110px; flex-shrink: 0; color: var(--text-secondary); }
+  .bar-row .bar-label { width: 110px; flex-shrink: 0; color: var(--text-secondary); overflow-wrap: break-word; }
   .bar-row .bar-track { flex: 1; height: 8px; background: rgba(255,255,255,0.05); border-radius: 4px; overflow: hidden; }
   .bar-row .bar-fill { height: 100%; background: var(--accent); border-radius: 4px; }
   .bar-row .bar-val { width: 36px; text-align: right; color: var(--text-secondary); flex-shrink: 0; }
@@ -89,15 +103,18 @@
   .quick-btn {
     padding: 10px 16px; border-radius: 10px; border: 1px solid var(--border);
     background: rgba(255,255,255,0.03); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer;
+    max-width: 100%; overflow-wrap: break-word;
   }
   .quick-btn:hover { background: var(--surface-hover); }
   .quick-btn.danger { border-color: rgba(239,68,68,0.3); color: var(--accent); }
   .quick-btn.safe { border-color: rgba(34,197,94,0.3); color: var(--green); }
 
   .toast-wrap { position: fixed; top: 16px; right: 16px; left: 16px; z-index: 999; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
-  .toast { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 12px 16px; font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); max-width: 300px; }
+  .toast { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 12px 16px; font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); max-width: 300px; overflow-wrap: break-word; }
   .toast.err { border-color: rgba(239,68,68,0.4); color: var(--accent); }
   .toast.ok { border-color: rgba(34,197,94,0.4); color: var(--green); }
+
+  .empty-note { color: var(--text-secondary); font-size: 13px; }
 </style>
 </head>
 <body>
@@ -121,134 +138,154 @@
     </div>
   </div>
 
-  <div class="stat-grid">
-    <div class="stat-card"><div class="num" id="statTotal">—</div><div class="label">Всего визитов</div></div>
-    <div class="stat-card"><div class="num" id="statUnique">—</div><div class="label">Уникальных посетителей</div></div>
-    <div class="stat-card"><div class="num" id="statToday">—</div><div class="label">Визитов сегодня</div></div>
-    <div class="stat-card"><div class="num" id="statSubs">—</div><div class="label">Активных подписчиков push</div></div>
+  <div class="tabs" id="tabsNav">
+    <button class="tab-btn active" data-tab="stats" type="button">📊 Статистика</button>
+    <button class="tab-btn" data-tab="sources" type="button">📡 Источники</button>
+    <button class="tab-btn" data-tab="alarm" type="button">🔔 Тревога</button>
+    <button class="tab-btn" data-tab="manual" type="button">✍️ Ручная отправка</button>
   </div>
 
-  <div class="grid-2">
-    <div class="panel">
-      <h2>📈 Визиты по дням (30 дней)</h2>
-      <canvas id="chartDaily"></canvas>
+  <!-- ===== Вкладка: Статистика ===== -->
+  <div class="tab-panel active" id="tab-stats">
+    <div class="stat-grid">
+      <div class="stat-card"><div class="num" id="statTotal">—</div><div class="label">Всего визитов</div></div>
+      <div class="stat-card"><div class="num" id="statUnique">—</div><div class="label">Уникальных посетителей</div></div>
+      <div class="stat-card"><div class="num" id="statToday">—</div><div class="label">Визитов сегодня</div></div>
+      <div class="stat-card"><div class="num" id="statSubs">—</div><div class="label">Активных подписчиков push</div></div>
     </div>
-    <div class="panel">
-      <h2>🕐 Визиты по часам сегодня</h2>
-      <canvas id="chartHourly"></canvas>
-    </div>
-  </div>
 
-  <div class="grid-2">
-    <div class="panel">
-      <h2>📱 Устройства</h2>
-      <canvas id="chartDevices"></canvas>
+    <div class="grid-2">
+      <div class="panel">
+        <h2>📈 Визиты по дням (30 дней)</h2>
+        <div class="chart-box"><canvas id="chartDaily"></canvas></div>
+      </div>
+      <div class="panel">
+        <h2>🕐 Визиты по часам сегодня</h2>
+        <div class="chart-box"><canvas id="chartHourly"></canvas></div>
+      </div>
     </div>
-    <div class="panel">
-      <h2>🌐 Браузеры</h2>
-      <canvas id="chartBrowsers"></canvas>
-    </div>
-  </div>
 
-  <div class="grid-2">
+    <div class="grid-2">
+      <div class="panel">
+        <h2>📱 Устройства</h2>
+        <div class="chart-box"><canvas id="chartDevices"></canvas></div>
+      </div>
+      <div class="panel">
+        <h2>🌐 Браузеры</h2>
+        <div class="chart-box"><canvas id="chartBrowsers"></canvas></div>
+      </div>
+    </div>
+
     <div class="panel">
       <h2>🔗 Источники переходов</h2>
       <div id="referrersList">—</div>
     </div>
+
+    <div class="panel">
+      <h2>🕓 Последние посещения</h2>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Время</th><th>Страница</th><th>Источник</th><th>Устройство</th><th>Браузер</th></tr></thead>
+          <tbody id="recentVisitsBody"><tr><td colspan="5">Загрузка…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Вкладка: Источники (каналы) ===== -->
+  <div class="tab-panel" id="tab-sources">
+    <div class="panel">
+      <h2>📰 Каналы-источники</h2>
+      <div id="channelsList" style="margin-bottom:14px;">—</div>
+      <div class="form-row">
+        <label>Добавить канал (ссылка t.me/... или имя)</label>
+        <input type="text" id="newChannelInput" placeholder="https://t.me/LiveOnlain">
+      </div>
+      <button class="btn secondary small" id="addChannelBtn" type="button">Добавить источник</button>
+    </div>
+
     <div class="panel">
       <h2>📍 Подписчики push по районам</h2>
       <div id="subsByRegionList">—</div>
     </div>
-  </div>
 
-  <div class="panel">
-    <h2>📡 Сообщения в ленте по типу</h2>
-    <div id="feedByTypeList">—</div>
-  </div>
-
-  <div class="panel">
-    <h2>📰 Источники (каналы)</h2>
-    <div id="channelsList" style="margin-bottom:14px;">—</div>
-    <div class="form-row">
-      <label>Добавить канал (ссылка t.me/... или имя)</label>
-      <input type="text" id="newChannelInput" placeholder="https://t.me/LiveOnlain">
-    </div>
-    <button class="btn secondary small" id="addChannelBtn" type="button">Добавить источник</button>
-  </div>
-
-  <div class="panel">
-    <h2>🔔 Звуковая тревога — какие сообщения включают громкий push</h2>
-    <div class="form-row">
-      <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
-        <input type="checkbox" id="alarmEnabled" style="width:18px;height:18px;"> Звуковая тревога включена
-      </label>
-    </div>
-    <div class="form-row">
-      <label>Типы сообщений, вызывающие громкий push (с звуком/вибрацией)</label>
-      <div id="alarmTypesBox" style="display:flex; flex-wrap:wrap; gap:10px;"></div>
-    </div>
-    <div class="form-row">
-      <label>Районы, для которых действует громкая тревога</label>
-      <div id="alarmRegionsBox" style="display:flex; flex-wrap:wrap; gap:10px;"></div>
-    </div>
-    <button class="btn secondary small" id="saveAlarmBtn" type="button">Сохранить настройки тревоги</button>
-  </div>
-
-  <div class="panel">
-    <h2>🕓 Последние посещения</h2>
-    <table>
-      <thead><tr><th>Время</th><th>Страница</th><th>Источник</th><th>Устройство</th><th>Браузер</th></tr></thead>
-      <tbody id="recentVisitsBody"><tr><td colspan="5">Загрузка…</td></tr></tbody>
-    </table>
-  </div>
-
-  <div class="panel">
-    <h2>⚡ Быстрый отбой</h2>
-    <div class="quick-actions">
-      <button class="quick-btn safe" data-cancel-region="all" type="button">✅ Отбой по всей области</button>
-      <button class="quick-btn safe" data-cancel-region="belgorod" type="button">✅ Отбой — Белгород</button>
-      <button class="quick-btn safe" data-cancel-region="valuiki" type="button">✅ Отбой — Валуйки</button>
-      <button class="quick-btn safe" data-cancel-region="shebekino" type="button">✅ Отбой — Шебекино</button>
-      <button class="quick-btn safe" data-cancel-region="graivoron" type="button">✅ Отбой — Грайворон</button>
-      <button class="quick-btn safe" data-cancel-region="stary-oskol" type="button">✅ Отбой — Старый Оскол</button>
-      <button class="quick-btn safe" data-cancel-region="gubkin" type="button">✅ Отбой — Губкин</button>
-      <button class="quick-btn safe" data-cancel-region="korocha" type="button">✅ Отбой — Короча</button>
-      <button class="quick-btn safe" data-cancel-region="krasnaya-yaruga" type="button">✅ Отбой — Красная Яруга</button>
+    <div class="panel">
+      <h2>📡 Сообщения в ленте по типу</h2>
+      <div id="feedByTypeList">—</div>
     </div>
   </div>
 
-  <div class="panel">
-    <h2>✍️ Написать в ленту вручную</h2>
-    <div class="form-row">
-      <label>Тип сообщения</label>
-      <select id="msgType">
-        <option value="rocket">🚀 Ракетная опасность</option>
-        <option value="drone">🛸 БПЛА обнаружен</option>
-        <option value="cancel">✅ Отбой / отмена</option>
-        <option value="shelter">🏃 В укрытие</option>
-        <option value="repeat">💬 Повторно</option>
-        <option value="admin">📢 Объявление администрации</option>
-      </select>
+  <!-- ===== Вкладка: Тревога ===== -->
+  <div class="tab-panel" id="tab-alarm">
+    <div class="panel">
+      <h2>🔔 Звуковая тревога — какие сообщения включают громкий push</h2>
+      <div class="form-row">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; text-transform:none;">
+          <input type="checkbox" id="alarmEnabled" style="width:18px;height:18px;flex-shrink:0;"> Звуковая тревога включена
+        </label>
+      </div>
+      <div class="form-row">
+        <label>Типы сообщений, вызывающие громкий push (с звуком/вибрацией)</label>
+        <div id="alarmTypesBox" style="display:flex; flex-wrap:wrap; gap:10px;"></div>
+      </div>
+      <div class="form-row">
+        <label>Районы, для которых действует громкая тревога</label>
+        <div id="alarmRegionsBox" style="display:flex; flex-wrap:wrap; gap:10px;"></div>
+      </div>
+      <button class="btn secondary small" id="saveAlarmBtn" type="button">Сохранить настройки тревоги</button>
     </div>
-    <div class="form-row">
-      <label>Район</label>
-      <select id="msgRegion">
-        <option value="all">По всей области</option>
-        <option value="belgorod">Белгород</option>
-        <option value="valuiki">Валуйки</option>
-        <option value="shebekino">Шебекино</option>
-        <option value="graivoron">Грайворон</option>
-        <option value="stary-oskol">Старый Оскол</option>
-        <option value="gubkin">Губкин</option>
-        <option value="korocha">Короча</option>
-        <option value="krasnaya-yaruga">Красная Яруга</option>
-      </select>
+
+    <div class="panel">
+      <h2>⚡ Быстрый отбой</h2>
+      <div class="quick-actions">
+        <button class="quick-btn safe" data-cancel-region="all" type="button">✅ Отбой по всей области</button>
+        <button class="quick-btn safe" data-cancel-region="belgorod" type="button">✅ Отбой — Белгород</button>
+        <button class="quick-btn safe" data-cancel-region="valuiki" type="button">✅ Отбой — Валуйки</button>
+        <button class="quick-btn safe" data-cancel-region="shebekino" type="button">✅ Отбой — Шебекино</button>
+        <button class="quick-btn safe" data-cancel-region="graivoron" type="button">✅ Отбой — Грайворон</button>
+        <button class="quick-btn safe" data-cancel-region="stary-oskol" type="button">✅ Отбой — Старый Оскол</button>
+        <button class="quick-btn safe" data-cancel-region="gubkin" type="button">✅ Отбой — Губкин</button>
+        <button class="quick-btn safe" data-cancel-region="korocha" type="button">✅ Отбой — Короча</button>
+        <button class="quick-btn safe" data-cancel-region="krasnaya-yaruga" type="button">✅ Отбой — Красная Яруга</button>
+      </div>
     </div>
-    <div class="form-row">
-      <label>Текст сообщения</label>
-      <textarea id="msgText" placeholder="Например: Ракетная опасность в Белгородском районе"></textarea>
+  </div>
+
+  <!-- ===== Вкладка: Ручная отправка ===== -->
+  <div class="tab-panel" id="tab-manual">
+    <div class="panel">
+      <h2>✍️ Написать в ленту вручную</h2>
+      <div class="form-row">
+        <label>Тип сообщения</label>
+        <select id="msgType">
+          <option value="rocket">🚀 Ракетная опасность</option>
+          <option value="drone">🛸 БПЛА обнаружен</option>
+          <option value="cancel">✅ Отбой / отмена</option>
+          <option value="shelter">🏃 В укрытие</option>
+          <option value="repeat">💬 Повторно</option>
+          <option value="admin">📢 Объявление администрации</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Район</label>
+        <select id="msgRegion">
+          <option value="all">По всей области</option>
+          <option value="belgorod">Белгород</option>
+          <option value="valuiki">Валуйки</option>
+          <option value="shebekino">Шебекино</option>
+          <option value="graivoron">Грайворон</option>
+          <option value="stary-oskol">Старый Оскол</option>
+          <option value="gubkin">Губкин</option>
+          <option value="korocha">Короча</option>
+          <option value="krasnaya-yaruga">Красная Яруга</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Текст сообщения</label>
+        <textarea id="msgText" placeholder="Например: Ракетная опасность в Белгородском районе"></textarea>
+      </div>
+      <button class="btn" id="sendMsgBtn" type="button">Отправить в ленту</button>
     </div>
-    <button class="btn" id="sendMsgBtn" type="button">Отправить в ленту</button>
   </div>
 </div>
 
@@ -273,19 +310,38 @@ function getToken() { return localStorage.getItem(TOKEN_KEY); }
 function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
 function clearToken() { localStorage.removeItem(TOKEN_KEY); }
 
+// apiGet/apiPost теперь ВСЕГДА бросают исключение при ошибке (сеть, 4xx/5xx),
+// с внятным текстом — раньше ошибка от сервера просто возвращалась как обычный
+// JSON без throw, из-за чего вызывающий код не понимал, что запрос не удался.
 async function apiGet(path) {
-  var res = await fetch(API_BASE + path, { headers: { 'Authorization': 'Bearer ' + getToken() } });
+  var res;
+  try {
+    res = await fetch(API_BASE + path, { headers: { 'Authorization': 'Bearer ' + getToken() } });
+  } catch (err) {
+    throw new Error('Нет соединения с сервером');
+  }
   if (res.status === 401) { showLogin(); throw new Error('unauthorized'); }
-  return res.json();
+  var data = null;
+  try { data = await res.json(); } catch (e) { /* пустой ответ */ }
+  if (!res.ok) throw new Error((data && data.error) || ('Ошибка сервера (' + res.status + ')'));
+  return data || {};
 }
-async function apiPost(path, body) {
-  var res = await fetch(API_BASE + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getToken() },
-    body: JSON.stringify(body || {})
-  });
+async function apiPost(path, body, method) {
+  var res;
+  try {
+    res = await fetch(API_BASE + path, {
+      method: method || 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getToken() },
+      body: JSON.stringify(body || {})
+    });
+  } catch (err) {
+    throw new Error('Нет соединения с сервером');
+  }
   if (res.status === 401) { showLogin(); throw new Error('unauthorized'); }
-  return res.json();
+  var data = null;
+  try { data = await res.json(); } catch (e) { /* пустой ответ */ }
+  if (!res.ok) throw new Error((data && data.error) || ('Ошибка сервера (' + res.status + ')'));
+  return data || {};
 }
 
 function showLogin() {
@@ -321,27 +377,47 @@ async function doLogin() {
   }
 }
 
-function renderBarList(container, obj, colorVar) {
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function renderBarListInto(containerId, obj, colorVar) {
+  var container = document.getElementById(containerId);
   var entries = Object.entries(obj || {}).sort(function(a, b) { return b[1] - a[1]; });
-  if (!entries.length) { container.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;">Нет данных</div>'; return; }
+  if (!entries.length) { container.innerHTML = '<div class="empty-note">Нет данных</div>'; return; }
   var max = Math.max.apply(null, entries.map(function(e) { return e[1]; }));
   container.innerHTML = entries.map(function(e) {
     var pct = max ? Math.round((e[1] / max) * 100) : 0;
-    return '<div class="bar-row"><span class="bar-label">' + e[0] + '</span>' +
+    return '<div class="bar-row"><span class="bar-label">' + escapeHtml(e[0]) + '</span>' +
       '<span class="bar-track"><span class="bar-fill" style="width:' + pct + '%; background:' + (colorVar || 'var(--accent)') + ';"></span></span>' +
       '<span class="bar-val">' + e[1] + '</span></div>';
   }).join('');
 }
 
-function makeOrUpdateChart(key, ctx, config) {
+function makeOrUpdateChart(key, canvasId, config) {
+  var el = document.getElementById(canvasId);
+  if (!el) return;
   if (charts[key]) { charts[key].destroy(); }
-  charts[key] = new Chart(ctx, config);
+  charts[key] = new Chart(el.getContext('2d'), config);
 }
 
+// Каждый раздел статистики оборачивается в собственный try/catch, чтобы падение
+// одного виджета (например, из-за неожиданной формы данных) не блокировало
+// обновление всех остальных — раньше одна ошибка «замораживала» всю панель
+// на состоянии «Загрузка…».
 async function loadStats() {
+  var data;
   try {
-    var data = await apiGet('/api/admin/stats');
+    data = await apiGet('/api/admin/stats');
+  } catch (err) {
+    if (err.message !== 'unauthorized') toast('Не удалось загрузить статистику: ' + err.message, 'err');
+    document.getElementById('recentVisitsBody').innerHTML = '<tr><td colspan="5">Ошибка загрузки</td></tr>';
+    return;
+  }
 
+  try {
     document.getElementById('statTotal').textContent = data.visits.total;
     document.getElementById('statUnique').textContent = data.visits.uniqueVisitors;
     document.getElementById('statToday').textContent = data.visits.today;
@@ -351,57 +427,64 @@ async function loadStats() {
     connDot.classList.toggle('off', !data.parser.ok);
     document.getElementById('parserStatusText').textContent = data.parser.ok
       ? 'Парсер активен' : 'Парсер недоступен';
+  } catch (err) { console.log('Ошибка виджета статов:', err); }
 
-    // Дневной график
+  try {
     var dailyEntries = Object.entries(data.visits.dailyCounts || {}).sort(function(a, b) { return a[0] < b[0] ? -1 : 1; }).slice(-30);
-    makeOrUpdateChart('daily', document.getElementById('chartDaily').getContext('2d'), {
+    makeOrUpdateChart('daily', 'chartDaily', {
       type: 'line',
       data: {
         labels: dailyEntries.map(function(e) { return e[0].slice(5); }),
         datasets: [{ label: 'Визиты', data: dailyEntries.map(function(e) { return e[1]; }), borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.3, fill: true }]
       },
-      options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#a3a3a3' }, grid: { color: '#262626' } }, y: { ticks: { color: '#a3a3a3' }, grid: { color: '#262626' }, beginAtZero: true } } }
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#a3a3a3' }, grid: { color: '#262626' } }, y: { ticks: { color: '#a3a3a3' }, grid: { color: '#262626' }, beginAtZero: true } } }
     });
+  } catch (err) { console.log('Ошибка графика (дни):', err); }
 
-    // Часовой график
+  try {
     var hours = (data.visits.hourlyToday && data.visits.hourlyToday.hours) || new Array(24).fill(0);
-    makeOrUpdateChart('hourly', document.getElementById('chartHourly').getContext('2d'), {
+    makeOrUpdateChart('hourly', 'chartHourly', {
       type: 'bar',
       data: {
         labels: hours.map(function(_, i) { return i + ':00'; }),
         datasets: [{ label: 'Визиты', data: hours, backgroundColor: '#3b82f6' }]
       },
-      options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#a3a3a3' }, grid: { display: false } }, y: { ticks: { color: '#a3a3a3' }, grid: { color: '#262626' }, beginAtZero: true } } }
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#a3a3a3' }, grid: { display: false } }, y: { ticks: { color: '#a3a3a3' }, grid: { color: '#262626' }, beginAtZero: true } } }
     });
+  } catch (err) { console.log('Ошибка графика (часы):', err); }
 
-    // Устройства
+  try {
     var devEntries = Object.entries(data.visits.devices || {});
-    makeOrUpdateChart('devices', document.getElementById('chartDevices').getContext('2d'), {
+    makeOrUpdateChart('devices', 'chartDevices', {
       type: 'doughnut',
       data: { labels: devEntries.map(function(e) { return e[0]; }), datasets: [{ data: devEntries.map(function(e) { return e[1]; }), backgroundColor: ['#ef4444', '#3b82f6', '#eab308', '#a855f7'] }] },
-      options: { plugins: { legend: { labels: { color: '#a3a3a3' } } } }
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#a3a3a3' } } } }
     });
+  } catch (err) { console.log('Ошибка графика (устройства):', err); }
 
-    // Браузеры
+  try {
     var brEntries = Object.entries(data.visits.browsers || {});
-    makeOrUpdateChart('browsers', document.getElementById('chartBrowsers').getContext('2d'), {
+    makeOrUpdateChart('browsers', 'chartBrowsers', {
       type: 'doughnut',
       data: { labels: brEntries.map(function(e) { return e[0]; }), datasets: [{ data: brEntries.map(function(e) { return e[1]; }), backgroundColor: ['#22c55e', '#3b82f6', '#eab308', '#ef4444', '#a855f7', '#a3a3a3'] }] },
-      options: { plugins: { legend: { labels: { color: '#a3a3a3' } } } }
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#a3a3a3' } } } }
     });
+  } catch (err) { console.log('Ошибка графика (браузеры):', err); }
 
-    renderBarList(document.getElementById('referrersList'), data.visits.referrers, 'var(--blue)');
-    renderBarList(document.getElementById('subsByRegionList'), data.subscribers.byRegion, 'var(--green)');
-    renderBarList(document.getElementById('feedByTypeList'), data.feed.byType, 'var(--purple)');
+  try { renderBarListInto('referrersList', data.visits.referrers, 'var(--blue)'); } catch (err) { console.log('Ошибка списка источников:', err); }
+  try { renderBarListInto('subsByRegionList', data.subscribers.byRegion, 'var(--green)'); } catch (err) { console.log('Ошибка списка подписчиков:', err); }
+  try { renderBarListInto('feedByTypeList', data.feed.byType, 'var(--purple)'); } catch (err) { console.log('Ошибка списка типов:', err); }
 
+  try {
     var rows = (data.visits.recent || []).map(function(v) {
       var d = new Date(v.t);
       var time = d.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
-      return '<tr><td>' + time + '</td><td>' + v.path + '</td><td>' + v.ref + '</td><td>' + v.device + '</td><td>' + v.browser + '</td></tr>';
+      return '<tr><td>' + time + '</td><td>' + escapeHtml(v.path) + '</td><td>' + escapeHtml(v.ref) + '</td><td>' + escapeHtml(v.device) + '</td><td>' + escapeHtml(v.browser) + '</td></tr>';
     });
     document.getElementById('recentVisitsBody').innerHTML = rows.length ? rows.join('') : '<tr><td colspan="5">Пока нет данных</td></tr>';
   } catch (err) {
-    console.log('Ошибка загрузки статистики:', err);
+    console.log('Ошибка таблицы посещений:', err);
+    document.getElementById('recentVisitsBody').innerHTML = '<tr><td colspan="5">Ошибка отображения</td></tr>';
   }
 }
 
@@ -411,7 +494,7 @@ async function sendCancel(region) {
     toast('Отбой отправлен' + (region === 'all' ? ' по всей области' : ''), 'ok');
     loadStats();
   } catch (err) {
-    toast('Ошибка отправки', 'err');
+    toast('Ошибка отправки: ' + err.message, 'err');
   }
 }
 
@@ -420,13 +503,17 @@ async function sendManualMessage() {
   var region = document.getElementById('msgRegion').value;
   var text = document.getElementById('msgText').value;
   if (!text.trim()) { toast('Введите текст сообщения', 'err'); return; }
+  var btn = document.getElementById('sendMsgBtn');
+  btn.disabled = true;
   try {
     await apiPost('/api/admin/message', { type: type, region: region, text: text });
     toast('Сообщение отправлено в ленту', 'ok');
     document.getElementById('msgText').value = '';
     loadStats();
   } catch (err) {
-    toast('Ошибка отправки', 'err');
+    toast('Ошибка отправки: ' + err.message, 'err');
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -435,21 +522,23 @@ async function loadChannels() {
   try {
     var data = await apiGet('/api/admin/channels');
     renderChannelsList(data.channels || [], data.channelHealth || {});
-  } catch (err) { /* уже обработано в apiGet */ }
+  } catch (err) {
+    document.getElementById('channelsList').innerHTML = '<div class="empty-note">Ошибка загрузки: ' + escapeHtml(err.message) + '</div>';
+  }
 }
 
 function renderChannelsList(list, health) {
   var box = document.getElementById('channelsList');
-  if (!list.length) { box.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;">Нет источников</div>'; return; }
+  if (!list.length) { box.innerHTML = '<div class="empty-note">Нет источников</div>'; return; }
   box.innerHTML = list.map(function(ch) {
     var h = health[ch] || {};
     var statusDot = h.ok ? 'var(--green)' : (h.ok === false ? 'var(--accent)' : 'var(--text-secondary)');
     var statusText = h.ok ? (h.count + ' сообщ.') : (h.ok === false ? 'ошибка' : 'ожидание');
     return '<div class="bar-row" style="align-items:center;">' +
       '<span style="width:9px;height:9px;border-radius:50%;background:' + statusDot + ';flex-shrink:0;"></span>' +
-      '<span class="bar-label" style="width:auto;flex:1;color:var(--text);">@' + ch + '</span>' +
-      '<span class="bar-val" style="width:auto;color:var(--text-secondary);">' + statusText + '</span>' +
-      '<button class="quick-btn danger" style="padding:5px 10px;font-size:12px;" data-remove-channel="' + ch + '" type="button">Удалить</button>' +
+      '<span class="bar-label" style="width:auto;flex:1;color:var(--text);word-break:break-all;">@' + escapeHtml(ch) + '</span>' +
+      '<span class="bar-val" style="width:auto;color:var(--text-secondary);white-space:nowrap;">' + statusText + '</span>' +
+      '<button class="quick-btn danger" style="padding:5px 10px;font-size:12px;" data-remove-channel="' + escapeHtml(ch) + '" type="button">Удалить</button>' +
       '</div>';
   }).join('');
   box.querySelectorAll('[data-remove-channel]').forEach(function(btn) {
@@ -462,35 +551,23 @@ async function addChannel() {
   var val = input.value.trim();
   if (!val) { toast('Укажите ссылку или имя канала', 'err'); return; }
   try {
-    var res = await fetch(API_BASE + '/api/admin/channels', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getToken() },
-      body: JSON.stringify({ channel: val })
-    });
-    var data = await res.json();
-    if (!res.ok) { toast(data.error === 'already added' ? 'Такой канал уже добавлен' : 'Не удалось добавить канал (проверьте ссылку)', 'err'); return; }
+    var data = await apiPost('/api/admin/channels', { channel: val });
     toast('Канал добавлен, опрашивается', 'ok');
     input.value = '';
     renderChannelsList(data.channels, {});
     setTimeout(loadChannels, 3000);
   } catch (err) {
-    toast('Ошибка соединения с сервером', 'err');
+    toast(err.message === 'already added' ? 'Такой канал уже добавлен' : 'Не удалось добавить канал: ' + err.message, 'err');
   }
 }
 
 async function removeChannel(channel) {
   try {
-    var res = await fetch(API_BASE + '/api/admin/channels', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getToken() },
-      body: JSON.stringify({ channel: channel })
-    });
-    var data = await res.json();
-    if (!res.ok) { toast(data.error === 'must keep at least one channel' ? 'Должен остаться хотя бы один источник' : 'Не удалось удалить канал', 'err'); return; }
+    var data = await apiPost('/api/admin/channels', { channel: channel }, 'DELETE');
     toast('Канал удалён', 'ok');
     renderChannelsList(data.channels, {});
   } catch (err) {
-    toast('Ошибка соединения с сервером', 'err');
+    toast(err.message === 'must keep at least one channel' ? 'Должен остаться хотя бы один источник' : 'Не удалось удалить канал: ' + err.message, 'err');
   }
 }
 
@@ -534,7 +611,9 @@ async function loadAlarmConfig() {
     alarmSelectedRegions = new Set(data.regions || ['all']);
     document.getElementById('alarmEnabled').checked = data.enabled !== false;
     renderAlarmChips();
-  } catch (err) { /* уже обработано в apiGet */ }
+  } catch (err) {
+    toast('Не удалось загрузить настройки тревоги: ' + err.message, 'err');
+  }
 }
 
 async function saveAlarmConfig() {
@@ -546,7 +625,23 @@ async function saveAlarmConfig() {
     });
     toast('Настройки тревоги сохранены', 'ok');
   } catch (err) {
-    toast('Ошибка сохранения', 'err');
+    toast('Ошибка сохранения: ' + err.message, 'err');
+  }
+}
+
+// ===== Вкладки =====
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(function(b) {
+    b.classList.toggle('active', b.getAttribute('data-tab') === name);
+  });
+  document.querySelectorAll('.tab-panel').forEach(function(p) {
+    p.classList.toggle('active', p.id === 'tab-' + name);
+  });
+  // Chart.js не может корректно посчитать размеры канваса, пока его контейнер
+  // скрыт через display:none — при возврате на вкладку "Статистика" надо
+  // явно пересчитать размеры уже созданных графиков.
+  if (name === 'stats') {
+    Object.keys(charts).forEach(function(k) { if (charts[k]) charts[k].resize(); });
   }
 }
 
@@ -559,6 +654,9 @@ function initHandlers() {
   document.getElementById('saveAlarmBtn').addEventListener('click', saveAlarmConfig);
   document.querySelectorAll('[data-cancel-region]').forEach(function(btn) {
     btn.addEventListener('click', function() { sendCancel(btn.getAttribute('data-cancel-region')); });
+  });
+  document.querySelectorAll('.tab-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() { switchTab(btn.getAttribute('data-tab')); });
   });
 }
 
