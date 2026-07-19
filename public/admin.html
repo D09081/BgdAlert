@@ -196,6 +196,7 @@
   <div class="tab-panel" id="tab-sources">
     <div class="panel">
       <h2>📰 Каналы-источники</h2>
+      <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">Если канал пишет только про конкретный город/район (например, только про сам Белгород) — закрепите за ним регион вручную, чтобы сообщения не классифицировались ошибочно по словам из текста.</p>
       <div id="channelsList" style="margin-bottom:14px;">—</div>
       <div class="form-row">
         <label>Добавить канал (ссылка t.me/... или имя)</label>
@@ -263,6 +264,7 @@
           <option value="cancel">✅ Отбой / отмена</option>
           <option value="shelter">🏃 В укрытие</option>
           <option value="repeat">💬 Повторно</option>
+          <option value="notice">ℹ️ Информационное (без сигнала тревоги)</option>
           <option value="admin">📢 Объявление администрации</option>
         </select>
       </div>
@@ -518,32 +520,58 @@ async function sendManualMessage() {
 }
 
 // ===== Источники (каналы) =====
+var CHANNEL_REGION_OPTIONS = {
+  auto: 'Авто (по тексту)', all: 'Вся область', belgorod: 'Белгород', valuiki: 'Валуйки',
+  shebekino: 'Шебекино', graivoron: 'Грайворон', 'stary-oskol': 'Старый Оскол',
+  gubkin: 'Губкин', korocha: 'Короча', 'krasnaya-yaruga': 'Красная Яруга'
+};
+
 async function loadChannels() {
   try {
     var data = await apiGet('/api/admin/channels');
-    renderChannelsList(data.channels || [], data.channelHealth || {});
+    renderChannelsList(data.channels || [], data.channelHealth || {}, data.channelRegions || {});
   } catch (err) {
     document.getElementById('channelsList').innerHTML = '<div class="empty-note">Ошибка загрузки: ' + escapeHtml(err.message) + '</div>';
   }
 }
 
-function renderChannelsList(list, health) {
+function renderChannelsList(list, health, channelRegions) {
+  channelRegions = channelRegions || {};
   var box = document.getElementById('channelsList');
   if (!list.length) { box.innerHTML = '<div class="empty-note">Нет источников</div>'; return; }
   box.innerHTML = list.map(function(ch) {
     var h = health[ch] || {};
     var statusDot = h.ok ? 'var(--green)' : (h.ok === false ? 'var(--accent)' : 'var(--text-secondary)');
     var statusText = h.ok ? (h.count + ' сообщ.') : (h.ok === false ? 'ошибка' : 'ожидание');
-    return '<div class="bar-row" style="align-items:center;">' +
+    var currentRegion = channelRegions[ch] || 'auto';
+    var regionSelect = '<select data-channel-region="' + escapeHtml(ch) + '" style="padding:6px 8px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,0.03);color:var(--text);font-size:12px;">' +
+      Object.keys(CHANNEL_REGION_OPTIONS).map(function(key) {
+        return '<option value="' + key + '"' + (key === currentRegion ? ' selected' : '') + '>' + CHANNEL_REGION_OPTIONS[key] + '</option>';
+      }).join('') + '</select>';
+    return '<div class="bar-row" style="align-items:center;flex-wrap:wrap;">' +
       '<span style="width:9px;height:9px;border-radius:50%;background:' + statusDot + ';flex-shrink:0;"></span>' +
       '<span class="bar-label" style="width:auto;flex:1;color:var(--text);word-break:break-all;">@' + escapeHtml(ch) + '</span>' +
       '<span class="bar-val" style="width:auto;color:var(--text-secondary);white-space:nowrap;">' + statusText + '</span>' +
+      regionSelect +
       '<button class="quick-btn danger" style="padding:5px 10px;font-size:12px;" data-remove-channel="' + escapeHtml(ch) + '" type="button">Удалить</button>' +
       '</div>';
   }).join('');
   box.querySelectorAll('[data-remove-channel]').forEach(function(btn) {
     btn.addEventListener('click', function() { removeChannel(btn.getAttribute('data-remove-channel')); });
   });
+  box.querySelectorAll('[data-channel-region]').forEach(function(sel) {
+    sel.addEventListener('change', function() { saveChannelRegion(sel.getAttribute('data-channel-region'), sel.value); });
+  });
+}
+
+async function saveChannelRegion(channel, region) {
+  try {
+    await apiPost('/api/admin/channel-region', { channel: channel, region: region });
+    toast('Регион канала @' + channel + ' сохранён', 'ok');
+  } catch (err) {
+    toast('Не удалось сохранить регион канала: ' + err.message, 'err');
+    loadChannels(); // откатываем select к реальному состоянию сервера
+  }
 }
 
 async function addChannel() {
@@ -554,7 +582,7 @@ async function addChannel() {
     var data = await apiPost('/api/admin/channels', { channel: val });
     toast('Канал добавлен, опрашивается', 'ok');
     input.value = '';
-    renderChannelsList(data.channels, {});
+    renderChannelsList(data.channels, {}, {});
     setTimeout(loadChannels, 3000);
   } catch (err) {
     toast(err.message === 'already added' ? 'Такой канал уже добавлен' : 'Не удалось добавить канал: ' + err.message, 'err');
@@ -563,9 +591,9 @@ async function addChannel() {
 
 async function removeChannel(channel) {
   try {
-    var data = await apiPost('/api/admin/channels', { channel: channel }, 'DELETE');
+    await apiPost('/api/admin/channels', { channel: channel }, 'DELETE');
     toast('Канал удалён', 'ok');
-    renderChannelsList(data.channels, {});
+    loadChannels();
   } catch (err) {
     toast(err.message === 'must keep at least one channel' ? 'Должен остаться хотя бы один источник' : 'Не удалось удалить канал: ' + err.message, 'err');
   }
@@ -573,8 +601,8 @@ async function removeChannel(channel) {
 
 // ===== Настройки звуковой тревоги =====
 var ALARM_TYPE_LABELS = {
-  rocket: '🚀 Ракетная опасность', drone: '🛸 БПЛА', cancel: '✅ Отбой',
-  shelter: '🏃 В укрытие', repeat: '💬 Повторно', admin: '📢 Объявление'
+  rocket: '🚀 Ракетная опасность / авиаудар', drone: '🛸 БПЛА обнаружен', cancel: '✅ Отбой',
+  shelter: '🏃 В укрытие', repeat: '💬 Повторно', notice: 'ℹ️ Общая активность (без атаки)', admin: '📢 Объявление'
 };
 var ALARM_REGION_LABELS = {
   all: 'Все районы', belgorod: 'Белгород', valuiki: 'Валуйки', shebekino: 'Шебекино',

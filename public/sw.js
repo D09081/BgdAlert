@@ -32,6 +32,12 @@ self.addEventListener('push', (event) => {
     if (event.data) data.body = event.data.text();
   }
 
+  // sound/vibro приходят от сервера как персональные настройки этого подписчика
+  // (по умолчанию — включено, если сервер их не прислал, например для старых
+  // клиентов до обновления).
+  const soundOn = data.sound !== false;
+  const vibroOn = data.vibro !== false;
+
   const options = {
     body: data.body,
     icon: './icon-192.png',
@@ -39,8 +45,9 @@ self.addEventListener('push', (event) => {
     tag: data.tag || 'alert',
     renotify: true,
     requireInteraction: !!data.urgent,
-    vibrate: data.urgent ? [400, 150, 400, 150, 600, 150, 400, 150, 400] : [200, 100, 200],
-    data: { url: data.url || './' }
+    silent: !soundOn,
+    vibrate: vibroOn ? (data.urgent ? [400, 150, 400, 150, 600, 150, 400, 150, 400] : [200, 100, 200]) : [],
+    data: { url: data.url || './', urgent: !!data.urgent, sound: soundOn, vibro: vibroOn }
   };
 
   event.waitUntil(self.registration.showNotification(data.title, options));

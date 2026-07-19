@@ -51,6 +51,15 @@
     padding-left: env(safe-area-inset-left);
     padding-right: env(safe-area-inset-right);
   }
+  /* На широких экранах (планшет/десктоп) все блоки — статус, лента, карта укрытий,
+     правила — раньше растягивались на всю ширину окна независимо друг от друга и
+     "съезжали" относительно друг друга (у статус-карточки был свой max-width, а у
+     карты/правил/ленты — нет). Теперь весь контент одинаково ограничен по ширине
+     и выровнен по центру, как единая колонка. */
+  .header, .status-wrap, .region-filter-label, .region-tabs,
+  #view-feed, .map-wrap, .guide-view, .bottom-nav {
+    max-width: 560px; margin-left: auto; margin-right: auto;
+  }
   .header {
     position: sticky; top: 0; z-index: 100;
     background: rgba(10,10,10,0.85);
@@ -245,6 +254,7 @@
   .feed-ico.repeat { background: rgba(168,85,247,0.1); }
   .feed-ico.other { background: rgba(163,163,163,0.1); }
   .feed-ico.admin { background: rgba(168,85,247,0.12); }
+  .feed-ico.notice { background: rgba(59,130,246,0.1); }
   .feed-body { flex: 1; min-width: 0; }
   .feed-tag {
     font-size: 11px; font-weight: 700; text-transform: uppercase;
@@ -257,6 +267,7 @@
   .feed-tag.repeat { color: var(--purple); }
   .feed-tag.other { color: var(--text-secondary); }
   .feed-tag.admin { color: var(--purple); }
+  .feed-tag.notice { color: var(--blue); }
   .feed-text { font-size: 14px; line-height: 1.5; color: var(--text); word-break: break-word; }
   .feed-meta {
     display: flex; align-items: center; gap: 8px;
@@ -369,7 +380,7 @@
   }
   .btn.ghost:hover { background: rgba(255,255,255,0.04); }
   .toasts {
-    position: fixed; top: 72px; right: 16px; left: 16px; z-index: 999;
+    position: fixed; top: 72px; right: 16px; left: 16px; z-index: 1500;
     display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
     pointer-events: none;
   }
@@ -513,6 +524,7 @@
   </div>
   <div class="header-right">
     <span class="conn-dot" id="connDot" title="Статус соединения с парсером"></span>
+    <button class="bell" id="soundToggleBtn" type="button" title="Быстро включить/выключить звук тревоги">🔊</button>
     <button class="bell" id="bellBtn" type="button">
       🔔
       <span class="bell-dot"></span>
@@ -705,10 +717,24 @@ setTimeout(function() {
 // ===== Register Service Worker =====
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function() {
-    navigator.serviceWorker.register('sw.js').catch(function(err) {
+    navigator.serviceWorker.register('sw.js').then(function() {
+      // Раньше индикатор колокольчика (значок «подписан») не восстанавливался
+      // после перезагрузки страницы — он включался только в момент подписки и
+      // "забывался" при следующем открытии, хотя сама push-подписка браузера
+      // никуда не девалась. Проверяем реальное состояние подписки, а не только
+      // локальные настройки звука/вибро.
+      restoreSubscriptionIndicator();
+    }).catch(function(err) {
       console.log('SW registration failed:', err);
     });
   });
+}
+async function restoreSubscriptionIndicator() {
+  try {
+    var reg = await navigator.serviceWorker.ready;
+    var sub = await reg.pushManager.getSubscription();
+    document.getElementById('bellBtn').classList.toggle('on', !!sub);
+  } catch (err) { /* не критично */ }
 }
 
 // ===== Clock =====
@@ -735,6 +761,15 @@ async function fetchFeed() {
     if (prevTopId !== null && feed.length && feed[0].id !== prevTopId) {
       var top = feed[0];
       toast(top.i || '📡', top.tag || 'Новое сообщение', top.txt || '');
+      // Раньше triggerDangerAlarm()/triggerAllClear() существовали, но нигде не
+      // вызывались — при реальной ракетной опасности/БПЛА не звучала ни сирена,
+      // ни вибрация. 'notice' (общие информационные посты про активность БПЛА)
+      // тревогу намеренно НЕ вызывает.
+      if (top.t === 'rocket' || top.t === 'drone') {
+        triggerDangerAlarm();
+      } else if (top.t === 'cancel') {
+        triggerAllClear();
+      }
     }
   } catch (err) {
     setConn(false);
@@ -747,36 +782,75 @@ function setConn(ok) {
   dot.title = ok ? 'Парсер подключён' : 'Нет связи с парсером — проверьте backend/API_BASE';
 }
 
+function feedItemInnerHtml(item) {
+  var regionBadge = item.region && item.region !== 'belgorod' ?
+    '<span class="feed-region">' + (regionNames[item.region] || item.region) + '</span>' : '';
+  var manualBadge = item.manual ? '<span class="feed-region" style="background:rgba(168,85,247,0.15);color:var(--purple);">вручную</span>' : '';
+  var timeTitle = item.iso ? ' title="' + item.iso + '"' : '';
+  var timeNote = item.hasRealTime === false ? ' <span style="opacity:.6">(время сервера)</span>' : '';
+  return '<div class="feed-ico ' + item.t + '">' + item.i + '</div>' +
+    '<div class="feed-body">' +
+    '<div class="feed-tag ' + item.t + '">' + item.tag + regionBadge + manualBadge + '</div>' +
+    '<div class="feed-text">' + item.txt + '</div>' +
+    '<div class="feed-meta"' + timeTitle + '>' +
+    '<span class="feed-dot ' + (item.isNew ? 'pulse' : '') + '"></span>' +
+    '<span>' + item.time + timeNote + '</span><span>·</span><span>' + item.date + '</span>' +
+    '</div></div>';
+}
+
+// Раньше render() каждые 10 секунд полностью стирал и заново собирал список
+// (list.innerHTML = '' + createElement на каждый пункт) — это вызывало заметное
+// мерцание ленты при каждом опросе, даже если содержимое не менялось. Теперь
+// существующие карточки переиспользуются по id сообщения, и DOM обновляется
+// только там, где реально что-то изменилось.
 function render() {
   var list = document.getElementById('feedList');
-  list.innerHTML = '';
   var data = feed.filter(function(x) {
     var typeMatch = filter === 'all' || x.t === filter;
     var regionMatch = regionFilter === 'all' || x.region === regionFilter || x.region === 'all';
     return typeMatch && regionMatch;
   });
-  data.forEach(function(item) {
-    var el = document.createElement('div');
-    el.className = 'feed-item' + (item.isNew ? ' new' : '');
-    var regionBadge = item.region && item.region !== 'belgorod' ?
-      '<span class="feed-region">' + (regionNames[item.region] || item.region) + '</span>' : '';
-    var manualBadge = item.manual ? '<span class="feed-region" style="background:rgba(168,85,247,0.15);color:var(--purple);">вручную</span>' : '';
-    var timeTitle = item.iso ? ' title="' + item.iso + '"' : '';
-    var timeNote = item.hasRealTime === false ? ' <span style="opacity:.6">(время сервера)</span>' : '';
-    el.innerHTML =
-      '<div class="feed-ico ' + item.t + '">' + item.i + '</div>' +
-      '<div class="feed-body">' +
-      '<div class="feed-tag ' + item.t + '">' + item.tag + regionBadge + manualBadge + '</div>' +
-      '<div class="feed-text">' + item.txt + '</div>' +
-      '<div class="feed-meta"' + timeTitle + '>' +
-      '<span class="feed-dot ' + (item.isNew ? 'pulse' : '') + '"></span>' +
-      '<span>' + item.time + timeNote + '</span><span>·</span><span>' + item.date + '</span>' +
-      '</div></div>';
-    list.appendChild(el);
-  });
+
   if (data.length === 0) {
     list.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary);font-size:14px;">Нет событий для выбранного района</div>';
+    return;
   }
+
+  // Если сейчас в списке заглушка ("Загрузка…" / "Нет событий") — убираем её
+  // перед первой реальной отрисовкой.
+  if (list.children.length && !list.children[0].dataset.id) list.innerHTML = '';
+
+  var existing = {};
+  Array.prototype.forEach.call(list.children, function(el) {
+    if (el.dataset && el.dataset.id) existing[el.dataset.id] = el;
+  });
+
+  var frag = document.createDocumentFragment();
+  data.forEach(function(item) {
+    var id = String(item.id);
+    var sig = item.t + '|' + item.tag + '|' + item.txt + '|' + item.time + '|' + item.date + '|' + item.region + '|' + (item.manual ? 1 : 0) + '|' + (item.isNew ? 1 : 0);
+    var el = existing[id];
+    if (el) {
+      delete existing[id];
+      if (el.dataset.sig !== sig) {
+        el.className = 'feed-item' + (item.isNew ? ' new' : '');
+        el.innerHTML = feedItemInnerHtml(item);
+        el.dataset.sig = sig;
+      }
+    } else {
+      el = document.createElement('div');
+      el.dataset.id = id;
+      el.dataset.sig = sig;
+      el.className = 'feed-item' + (item.isNew ? ' new' : '');
+      el.innerHTML = feedItemInnerHtml(item);
+    }
+    frag.appendChild(el);
+  });
+
+  // Что осталось в existing — карточки, которых больше нет в отфильтрованных данных
+  Object.keys(existing).forEach(function(id) { existing[id].remove(); });
+
+  list.appendChild(frag);
 }
 
 function updateStatusFromFeed() {
@@ -844,11 +918,60 @@ function loadPrefsFromStorage() {
       pushRegionsSelected = prefs.regions;
     }
   } catch (e) {}
+  updateSoundToggleBtnUI();
 }
 
 function openModal() { document.getElementById('modal').classList.add('show'); }
 function closeModal() { document.getElementById('modal').classList.remove('show'); }
-function toggleSwitch(el) { el.classList.toggle('on'); savePrefsToStorage(); }
+
+// Кнопка-колокольчик в шапке (#soundToggleBtn) раньше не была подключена вообще —
+// клик по ней ничего не делал. Она должна оперативно, без открытия модалки,
+// включать/выключать звуковую тревогу — синхронизируем её с тумблером в модалке.
+function updateSoundToggleBtnUI() {
+  var btn = document.getElementById('soundToggleBtn');
+  var on = soundEnabled();
+  btn.textContent = on ? '🔊' : '🔇';
+  btn.classList.toggle('on', on);
+  btn.title = on ? 'Звук тревоги включён — нажмите, чтобы выключить' : 'Звук тревоги выключен — нажмите, чтобы включить';
+}
+// Раньше быстрая кнопка и тумблеры в модалке только сохраняли выбор в
+// localStorage — реальная push-подписка на сервере, созданная при первом
+// включении уведомлений, так и оставалась с исходным звуком/вибро. То есть
+// выключение звука кнопкой не влияло на настоящие фоновые push-уведомления.
+// Теперь при любом переключении звука/вибрации, если подписка уже активна,
+// новое значение сразу же досылается на сервер и сохраняется в ней.
+async function syncPushPrefsIfSubscribed() {
+  try {
+    if (!('serviceWorker' in navigator)) return;
+    var reg = await navigator.serviceWorker.ready;
+    var sub = await reg.pushManager.getSubscription();
+    if (!sub) return; // ещё не подписан — значения применятся при подписке
+    var soundOn = document.getElementById('swSound').classList.contains('on');
+    var vibroOn = document.getElementById('swVibro').classList.contains('on');
+    await fetch(API_BASE + '/api/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subscription: sub, regions: pushRegionsSelected, sound: soundOn, vibro: vibroOn })
+    });
+  } catch (err) { console.log('Ошибка синхронизации настроек push:', err); }
+}
+
+function quickToggleSound() {
+  var sw = document.getElementById('swSound');
+  sw.classList.toggle('on');
+  savePrefsToStorage();
+  updateSoundToggleBtnUI();
+  syncPushPrefsIfSubscribed();
+  var on = sw.classList.contains('on');
+  toast(on ? '🔊' : '🔇', on ? 'Звук тревоги включён' : 'Звук тревоги выключен', 'Можно быстро переключить этой кнопкой в любой момент');
+}
+
+function toggleSwitch(el) {
+  el.classList.toggle('on');
+  savePrefsToStorage();
+  if (el.id === 'swSound') updateSoundToggleBtnUI();
+  syncPushPrefsIfSubscribed();
+}
 
 // Переключатель района в пуш-настройках: ВКЛ сразу применяет этот район
 // как фильтр ленты (видно уже под окном), но окно НЕ закрывается —
@@ -863,6 +986,7 @@ function toggleRegionSwitch(el) {
     setRegion(region, null);
   }
   savePrefsToStorage();
+  syncPushPrefsIfSubscribed();
 }
 
 async function savePush() {
@@ -876,6 +1000,11 @@ async function savePush() {
     closeModal();
     return;
   }
+
+  var saveBtn = document.getElementById('savePushBtn');
+  saveBtn.disabled = true;
+  var origLabel = saveBtn.textContent;
+  saveBtn.textContent = 'Включаем…';
 
   try {
     var perm = await Notification.requestPermission();
@@ -896,19 +1025,26 @@ async function savePush() {
       });
     }
 
-    await fetch(API_BASE + '/api/subscribe', {
+    var subRes = await fetch(API_BASE + '/api/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ subscription: sub, regions: pushRegionsSelected, sound: soundOn, vibro: vibroOn })
     });
+    if (!subRes.ok) throw new Error('server responded ' + subRes.status);
 
     document.getElementById('bellBtn').classList.add('on');
     savePrefsToStorage();
+    updateSoundToggleBtnUI();
     closeModal();
+    // Явное, гарантированное подтверждение — раньше окно могло закрыться без
+    // видимого результата, если тост не успевал отрендериться до закрытия модалки.
     toast('🔔', 'Уведомления включены', 'Районы: ' + pushRegionsSelected.map(function(r) { return regionNames[r] || r; }).join(', '));
   } catch (err) {
     console.log('Push subscribe error:', err);
-    toast('⚠️', 'Ошибка подписки', 'Проверьте, что backend с VAPID-ключами запущен');
+    toast('⚠️', 'Ошибка подписки', 'Не удалось включить уведомления — проверьте соединение с сервером');
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = origLabel;
   }
 }
 
@@ -931,11 +1067,48 @@ function toast(icon, title, text) {
 }
 
 // ===== In-app siren (используется, только если сработала реальная тревога и включён звук) =====
-var sirenCtx = null, sirenOscillators = [], sirenGainNodes = [], isMuted = false;
+// Раньше существовала только функция остановки сирены (stopSiren) — самого
+// звука тревоги нигде не было: ни воющего сигнала, ни навигатор.vibrate().
+// Теперь при появлении нового сообщения о ракетной опасности/БПЛА:
+//  - если включён тумблер «Звуковая сирена» — играет воющий сигнал (Web Audio);
+//  - если включён тумблер «Вибрация» — устройство вибрирует по шаблону тревоги.
+var sirenCtx = null, sirenOscillators = [], sirenGainNodes = [], sirenLfoId = null, isMuted = false;
+
+function soundEnabled() { return document.getElementById('swSound').classList.contains('on'); }
+function vibroEnabled() { return document.getElementById('swVibro').classList.contains('on'); }
+
+function startSiren() {
+  if (!soundEnabled() || isMuted) return;
+  if (sirenCtx) return; // уже играет
+  try {
+    sirenCtx = new (window.AudioContext || window.webkitAudioContext)();
+    var osc = sirenCtx.createOscillator();
+    var gain = sirenCtx.createGain();
+    osc.type = 'sine';
+    gain.gain.value = 0.0001;
+    osc.connect(gain).connect(sirenCtx.destination);
+    var t0 = sirenCtx.currentTime;
+    gain.gain.linearRampToValueAtTime(0.22, t0 + 0.3);
+    osc.start();
+    // Классическая «воющая» тревога — плавный подъём/спад частоты по кругу.
+    var phase = 0;
+    sirenLfoId = setInterval(function() {
+      if (!sirenCtx) return;
+      var now = sirenCtx.currentTime;
+      phase += 1;
+      var target = (phase % 2 === 0) ? 880 : 440;
+      osc.frequency.linearRampToValueAtTime(target, now + 0.9);
+    }, 900);
+    sirenOscillators.push(osc);
+    sirenGainNodes.push(gain);
+  } catch (err) { console.log('Siren init error:', err); }
+}
+
 function stopSiren(e) {
   if (e) e.stopPropagation();
   isMuted = true;
   document.getElementById('muteBtn').textContent = '🔇';
+  if (sirenLfoId) { clearInterval(sirenLfoId); sirenLfoId = null; }
   sirenOscillators.forEach(function(osc) { try { osc.stop(); } catch(err) {} });
   sirenOscillators = [];
   sirenGainNodes.forEach(function(gain) {
@@ -947,6 +1120,39 @@ function stopSiren(e) {
   });
   if (sirenCtx) { setTimeout(function() { try { sirenCtx.close(); } catch(err) {} sirenCtx = null; }, 200); }
   sirenGainNodes = [];
+  if (navigator.vibrate) navigator.vibrate(0);
+}
+
+// Шаблон вибрации для реальной атаки — повторяется, пока не подтверждён отбой/mute.
+var vibroTimerId = null;
+function startVibro() {
+  if (!vibroEnabled() || !navigator.vibrate || isMuted) return;
+  navigator.vibrate([400, 150, 400, 150, 600]);
+  if (vibroTimerId) clearInterval(vibroTimerId);
+  vibroTimerId = setInterval(function() {
+    if (isMuted || !vibroEnabled()) { clearInterval(vibroTimerId); vibroTimerId = null; return; }
+    navigator.vibrate([400, 150, 400, 150, 600]);
+  }, 4000);
+}
+function stopVibro() {
+  if (vibroTimerId) { clearInterval(vibroTimerId); vibroTimerId = null; }
+  if (navigator.vibrate) navigator.vibrate(0);
+}
+
+// Вызывается при появлении новой активной угрозы (ракета/БПЛА) в ленте.
+function triggerDangerAlarm() {
+  isMuted = false;
+  document.getElementById('muteBtn').textContent = '🔊';
+  startSiren();
+  startVibro();
+}
+// Вызывается при отбое — глушим и сирену, и вибрацию.
+function triggerAllClear() {
+  if (sirenLfoId) { clearInterval(sirenLfoId); sirenLfoId = null; }
+  sirenOscillators.forEach(function(osc) { try { osc.stop(); } catch(err) {} });
+  sirenOscillators = []; sirenGainNodes = [];
+  if (sirenCtx) { try { sirenCtx.close(); } catch(err) {} sirenCtx = null; }
+  stopVibro();
 }
 
 function showView(view) {
@@ -986,6 +1192,10 @@ function initHandlers() {
 
   // Колокольчик — открыть настройки push
   document.getElementById('bellBtn').addEventListener('click', openModal);
+
+  // Быстрая кнопка звука в шапке — включает/выключает звуковую тревогу без
+  // захода в настройки push.
+  document.getElementById('soundToggleBtn').addEventListener('click', quickToggleSound);
 
   // Кнопка отключения сирены
   document.getElementById('muteBtn').addEventListener('click', function(e) { stopSiren(e); });
