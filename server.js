@@ -361,7 +361,12 @@ async function pollOnce() {
       }
     }
 
-    state.feed = items.slice(0, 60); // храним последние 60 сообщений
+    // Ручные сообщения (отправленные из админки) не приходят из парсера каналов —
+    // сохраняем их поверх свежей выборки, иначе следующий же цикл опроса их сотрёт.
+    const manualItems = (state.feed || []).filter((it) => it.manual);
+    state.feed = manualItems.concat(items)
+      .sort((a, b) => b.ts - a.ts)
+      .slice(0, 60); // храним последние 60 сообщений
     // seenIds строим по ВСЕМ сообщениям канала (включая нерелевантные),
     // чтобы off-topic посты не пересчитывались и не «просачивались» после правок фильтра
     state.seenIds = allItems.slice(0, 200).map((it) => String(it.id));
