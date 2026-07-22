@@ -143,6 +143,12 @@
     <button class="tab-btn" data-tab="sources" type="button">📡 Источники</button>
     <button class="tab-btn" data-tab="alarm" type="button">🔔 Тревога</button>
     <button class="tab-btn" data-tab="manual" type="button">✍️ Ручная отправка</button>
+    <button class="tab-btn" data-tab="logs" type="button">🧾 Логи</button>
+  </div>
+
+  <div class="panel" id="statsErrorBanner" style="display:none; border-color: rgba(239,68,68,0.5); background: rgba(239,68,68,0.08);">
+    <h2 style="color:var(--accent);">⚠️ Ошибка загрузки статистики</h2>
+    <div id="statsErrorText" style="font-size:13px; color:var(--text-secondary);"></div>
   </div>
 
   <!-- ===== Вкладка: Статистика ===== -->
@@ -237,6 +243,36 @@
     </div>
 
     <div class="panel">
+      <h2>⚡ Быстрая ракетная опасность</h2>
+      <div class="quick-actions">
+        <button class="quick-btn danger" data-quick-alert="rocket:all" type="button">🚀 РО — по всей области</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:belgorod" type="button">🚀 РО — Белгород</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:valuiki" type="button">🚀 РО — Валуйки</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:shebekino" type="button">🚀 РО — Шебекино</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:graivoron" type="button">🚀 РО — Грайворон</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:stary-oskol" type="button">🚀 РО — Старый Оскол</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:gubkin" type="button">🚀 РО — Губкин</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:korocha" type="button">🚀 РО — Короча</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:krasnaya-yaruga" type="button">🚀 РО — Красная Яруга</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>⚡ Быстрый БПЛА</h2>
+      <div class="quick-actions">
+        <button class="quick-btn danger" data-quick-alert="drone:all" type="button">🛸 БПЛА — по всей области</button>
+        <button class="quick-btn danger" data-quick-alert="drone:belgorod" type="button">🛸 БПЛА — Белгород</button>
+        <button class="quick-btn danger" data-quick-alert="drone:valuiki" type="button">🛸 БПЛА — Валуйки</button>
+        <button class="quick-btn danger" data-quick-alert="drone:shebekino" type="button">🛸 БПЛА — Шебекино</button>
+        <button class="quick-btn danger" data-quick-alert="drone:graivoron" type="button">🛸 БПЛА — Грайворон</button>
+        <button class="quick-btn danger" data-quick-alert="drone:stary-oskol" type="button">🛸 БПЛА — Старый Оскол</button>
+        <button class="quick-btn danger" data-quick-alert="drone:gubkin" type="button">🛸 БПЛА — Губкин</button>
+        <button class="quick-btn danger" data-quick-alert="drone:korocha" type="button">🛸 БПЛА — Короча</button>
+        <button class="quick-btn danger" data-quick-alert="drone:krasnaya-yaruga" type="button">🛸 БПЛА — Красная Яруга</button>
+      </div>
+    </div>
+
+    <div class="panel">
       <h2>⚡ Быстрый отбой</h2>
       <div class="quick-actions">
         <button class="quick-btn safe" data-cancel-region="all" type="button">✅ Отбой по всей области</button>
@@ -287,6 +323,38 @@
         <textarea id="msgText" placeholder="Например: Ракетная опасность в Белгородском районе"></textarea>
       </div>
       <button class="btn" id="sendMsgBtn" type="button">Отправить в ленту</button>
+    </div>
+
+    <div class="panel">
+      <h2>🗂 Текущая лента</h2>
+      <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">Все сообщения, которые сейчас видят посетители сайта — из парсера канала и добавленные вручную (помечены значком ✍️). Можно удалить лишнее.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Время</th><th>Тип</th><th>Район</th><th>Текст</th><th></th></tr></thead>
+          <tbody id="feedListBody"><tr><td colspan="5">Загрузка…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Вкладка: Логи ===== -->
+  <div class="tab-panel" id="tab-logs">
+    <div class="panel">
+      <h2>🧾 Логи сервера</h2>
+      <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">Ошибки опроса каналов, отправки push, входов в админку и другие технические события. Полезно, когда что-то "не работает", но непонятно почему.</p>
+      <div class="quick-actions">
+        <button class="quick-btn" data-log-filter="" type="button">Все</button>
+        <button class="quick-btn danger" data-log-filter="error" type="button">Только ошибки</button>
+        <button class="quick-btn" data-log-filter="warn" type="button">Предупреждения</button>
+        <button class="quick-btn" data-log-filter="info" type="button">Инфо</button>
+        <button class="btn secondary small" id="refreshLogsBtn" type="button" style="width:auto;">↻ Обновить</button>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Время</th><th>Уровень</th><th>Сообщение</th></tr></thead>
+          <tbody id="logsBody"><tr><td colspan="3">Загрузка…</td></tr></tbody>
+        </table>
+      </div>
     </div>
   </div>
 </div>
@@ -357,7 +425,9 @@ function showDashboard() {
   loadStats();
   loadChannels();
   loadAlarmConfig();
-  refreshTimer = setInterval(loadStats, 20000);
+  loadLogs();
+  loadFeedList();
+  refreshTimer = setInterval(function() { loadStats(); loadLogs(); loadFeedList(); }, 20000);
 }
 
 async function doLogin() {
@@ -490,11 +560,26 @@ async function loadStats() {
   }
 }
 
+async function sendQuickAlert(type, region) {
+  var typeLabel = type === 'rocket' ? 'ракетную опасность' : 'БПЛА';
+  var regionLabel = region === 'all' ? 'по всей области' : region;
+  if (!confirm('Отправить тревогу «' + typeLabel + '» (' + regionLabel + ') в ленту и всем подписчикам?')) return;
+  try {
+    await apiPost('/api/admin/quick-alert', { type: type, region: region });
+    toast('Тревога отправлена', 'ok');
+    loadStats();
+    loadFeedList();
+  } catch (err) {
+    toast('Ошибка отправки: ' + err.message, 'err');
+  }
+}
+
 async function sendCancel(region) {
   try {
     await apiPost('/api/admin/cancel', { region: region });
     toast('Отбой отправлен' + (region === 'all' ? ' по всей области' : ''), 'ok');
     loadStats();
+    loadFeedList();
   } catch (err) {
     toast('Ошибка отправки: ' + err.message, 'err');
   }
@@ -512,6 +597,7 @@ async function sendManualMessage() {
     toast('Сообщение отправлено в ленту', 'ok');
     document.getElementById('msgText').value = '';
     loadStats();
+    loadFeedList();
   } catch (err) {
     toast('Ошибка отправки: ' + err.message, 'err');
   } finally {
@@ -657,7 +743,73 @@ async function saveAlarmConfig() {
   }
 }
 
-// ===== Вкладки =====
+// ===== Текущая лента (список + удаление) =====
+async function loadFeedList() {
+  var body = document.getElementById('feedListBody');
+  try {
+    var res = await fetch(API_BASE + '/api/feed');
+    var data = await res.json();
+    var items = data.items || [];
+    if (!items.length) { body.innerHTML = '<tr><td colspan="5">Лента пуста</td></tr>'; return; }
+    body.innerHTML = items.map(function(it) {
+      var regionLabel = (it.region === 'all' || !it.region) ? 'вся область' : it.region;
+      return '<tr>' +
+        '<td style="white-space:nowrap;">' + escapeHtml(it.time || '') + ' ' + escapeHtml(it.date || '') + '</td>' +
+        '<td style="white-space:nowrap;">' + escapeHtml(it.i || '') + ' ' + escapeHtml(it.tag || it.t || '') + (it.manual ? ' ✍️' : '') + '</td>' +
+        '<td style="white-space:nowrap;">' + escapeHtml(regionLabel) + '</td>' +
+        '<td>' + escapeHtml(it.txt || '') + '</td>' +
+        '<td><button class="quick-btn danger" style="padding:4px 10px;" data-delete-feed="' + escapeHtml(it.id) + '" type="button">🗑</button></td>' +
+        '</tr>';
+    }).join('');
+    document.querySelectorAll('[data-delete-feed]').forEach(function(btn) {
+      btn.addEventListener('click', function() { deleteFeedItem(btn.getAttribute('data-delete-feed')); });
+    });
+  } catch (err) {
+    body.innerHTML = '<tr><td colspan="5">Ошибка загрузки ленты</td></tr>';
+  }
+}
+
+async function deleteFeedItem(id) {
+  if (!confirm('Удалить это сообщение из ленты? Действие необратимо.')) return;
+  try {
+    await apiPost('/api/admin/feed/' + encodeURIComponent(id), null, 'DELETE');
+    toast('Сообщение удалено', 'ok');
+    loadFeedList();
+    loadStats();
+  } catch (err) {
+    toast('Ошибка удаления: ' + err.message, 'err');
+  }
+}
+
+
+var logsFilter = '';
+var LOG_LEVEL_COLOR = { error: 'var(--accent)', warn: 'var(--yellow)', info: 'var(--text-secondary)' };
+var LOG_LEVEL_LABEL = { error: 'Ошибка', warn: 'Предупреждение', info: 'Инфо' };
+
+async function loadLogs() {
+  var body = document.getElementById('logsBody');
+  try {
+    var qs = logsFilter ? ('?level=' + logsFilter + '&limit=200') : '?limit=200';
+    var data = await apiGet('/api/admin/logs' + qs);
+    var items = data.logs || [];
+    if (!items.length) { body.innerHTML = '<tr><td colspan="3">Пока нет записей</td></tr>'; return; }
+    body.innerHTML = items.map(function(l) {
+      var d = new Date(l.t);
+      var time = d.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit', second: '2-digit', day: '2-digit', month: '2-digit' });
+      var color = LOG_LEVEL_COLOR[l.level] || 'var(--text)';
+      var label = LOG_LEVEL_LABEL[l.level] || l.level;
+      return '<tr><td style="white-space:nowrap;">' + time + '</td>' +
+        '<td style="color:' + color + ';font-weight:700;white-space:nowrap;">' + escapeHtml(label) + '</td>' +
+        '<td>' + escapeHtml(l.message) + '</td></tr>';
+    }).join('');
+  } catch (err) {
+    if (err.message !== 'unauthorized') {
+      body.innerHTML = '<tr><td colspan="3">Ошибка загрузки логов: ' + escapeHtml(err.message) + '</td></tr>';
+    }
+  }
+}
+
+
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(function(b) {
     b.classList.toggle('active', b.getAttribute('data-tab') === name);
@@ -671,6 +823,9 @@ function switchTab(name) {
   if (name === 'stats') {
     Object.keys(charts).forEach(function(k) { if (charts[k]) charts[k].resize(); });
   }
+  if (name === 'logs') {
+    loadLogs();
+  }
 }
 
 function initHandlers() {
@@ -680,8 +835,25 @@ function initHandlers() {
   document.getElementById('sendMsgBtn').addEventListener('click', sendManualMessage);
   document.getElementById('addChannelBtn').addEventListener('click', addChannel);
   document.getElementById('saveAlarmBtn').addEventListener('click', saveAlarmConfig);
+  document.getElementById('refreshLogsBtn').addEventListener('click', loadLogs);
+  document.querySelectorAll('[data-log-filter]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      logsFilter = btn.getAttribute('data-log-filter');
+      document.querySelectorAll('[data-log-filter]').forEach(function(b) {
+        b.classList.toggle('danger', b === btn && logsFilter === 'error');
+        b.style.background = (b === btn && logsFilter !== 'error') ? 'rgba(239,68,68,0.12)' : '';
+      });
+      loadLogs();
+    });
+  });
   document.querySelectorAll('[data-cancel-region]').forEach(function(btn) {
     btn.addEventListener('click', function() { sendCancel(btn.getAttribute('data-cancel-region')); });
+  });
+  document.querySelectorAll('[data-quick-alert]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var parts = btn.getAttribute('data-quick-alert').split(':');
+      sendQuickAlert(parts[0], parts[1]);
+    });
   });
   document.querySelectorAll('.tab-btn').forEach(function(btn) {
     btn.addEventListener('click', function() { switchTab(btn.getAttribute('data-tab')); });

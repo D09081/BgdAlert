@@ -660,6 +660,7 @@
     <div class="region-push-row"><span>Губкин</span><div class="switch" data-region="gubkin"></div></div>
     <div class="region-push-row"><span>Короча</span><div class="switch" data-region="korocha"></div></div>
     <div class="region-push-row"><span>Красная Яруга</span><div class="switch" data-region="krasnaya-yaruga"></div></div>
+    <button class="btn ghost" id="testSignalBtn" type="button" style="margin-bottom:10px;">🔊 Проверить сигнал тревоги</button>
     <button class="btn" id="savePushBtn" type="button">Включить уведомления</button>
     <button class="btn ghost" id="laterBtn" type="button">Позже</button>
   </div>
@@ -1067,41 +1068,86 @@ function toast(icon, title, text) {
 }
 
 // ===== In-app siren (используется, только если сработала реальная тревога и включён звук) =====
-// Раньше существовала только функция остановки сирены (stopSiren) — самого
-// звука тревоги нигде не было: ни воющего сигнала, ни навигатор.vibrate().
-// Теперь при появлении нового сообщения о ракетной опасности/БПЛА:
-//  - если включён тумблер «Звуковая сирена» — играет воющий сигнал (Web Audio);
-//  - если включён тумблер «Вибрация» — устройство вибрирует по шаблону тревоги.
+// БАГ, из-за которого сирена/вибрация не звучали ни при ручной отправке из
+// админки, ни через парсер: AudioContext создавался ВНУТРИ triggerDangerAlarm(),
+// которая вызывается из setInterval (опрос ленты раз в 10 сек) — это НЕ
+// пользовательский жест. Браузер (особенно на телефоне — Chrome/Safari)
+// создаёт такой контекст в состоянии "suspended" и не даёт ему звучать без
+// явного тапа/клика по странице. Решение:
+//  1) один AudioContext создаётся один раз и переиспользуется, а не создаётся
+//     заново при каждой тревоге;
+//  2) он "разблокируется" первым же тапом/кликом пользователя по странице
+//     (и остаётся разблокированным до конца сессии);
+//  3) перед каждым проигрыванием сирены явно вызываем resume() — на случай,
+//     если вкладка была в фоне и браузер снова "усыпил" контекст;
+//  4) кнопка «Проверить сигнал» в настройках даёт пользователю проверить,
+//     что всё работает, и заодно гарантированно разблокирует звук на iOS,
+//     где resume() один без реального проигрывания звука иногда не срабатывает.
 var sirenCtx = null, sirenOscillators = [], sirenGainNodes = [], sirenLfoId = null, isMuted = false;
+var audioUnlocked = false;
 
 function soundEnabled() { return document.getElementById('swSound').classList.contains('on'); }
 function vibroEnabled() { return document.getElementById('swVibro').classList.contains('on'); }
 
+function getSirenCtx() {
+  if (!sirenCtx) {
+    try { sirenCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (err) { console.log('AudioContext create error:', err); return null; }
+  }
+  return sirenCtx;
+}
+
+// Разблокировка звука первым пользовательским жестом на странице — проигрываем
+// беззвучный тик, чтобы iOS Safari учла это как "звук был инициирован пользователем"
+// и больше не блокировала последующие programmatic-запуски сирены.
+function unlockAudio() {
+  if (audioUnlocked) return;
+  var ctx = getSirenCtx();
+  if (!ctx) return;
+  var resumePromise = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve();
+  resumePromise.then(function() {
+    try {
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      gain.gain.value = 0.00001;
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.05);
+    } catch (err) {}
+    audioUnlocked = true;
+  }).catch(function(err) { console.log('Audio unlock error:', err); });
+}
+document.addEventListener('click', unlockAudio, { once: false, passive: true });
+document.addEventListener('touchstart', unlockAudio, { once: false, passive: true });
+
 function startSiren() {
   if (!soundEnabled() || isMuted) return;
-  if (sirenCtx) return; // уже играет
-  try {
-    sirenCtx = new (window.AudioContext || window.webkitAudioContext)();
-    var osc = sirenCtx.createOscillator();
-    var gain = sirenCtx.createGain();
-    osc.type = 'sine';
-    gain.gain.value = 0.0001;
-    osc.connect(gain).connect(sirenCtx.destination);
-    var t0 = sirenCtx.currentTime;
-    gain.gain.linearRampToValueAtTime(0.22, t0 + 0.3);
-    osc.start();
-    // Классическая «воющая» тревога — плавный подъём/спад частоты по кругу.
-    var phase = 0;
-    sirenLfoId = setInterval(function() {
-      if (!sirenCtx) return;
-      var now = sirenCtx.currentTime;
-      phase += 1;
-      var target = (phase % 2 === 0) ? 880 : 440;
-      osc.frequency.linearRampToValueAtTime(target, now + 0.9);
-    }, 900);
-    sirenOscillators.push(osc);
-    sirenGainNodes.push(gain);
-  } catch (err) { console.log('Siren init error:', err); }
+  if (sirenLfoId) return; // уже играет
+  var ctx = getSirenCtx();
+  if (!ctx) return;
+  var afterResume = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve();
+  afterResume.then(function() {
+    try {
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.type = 'sine';
+      gain.gain.value = 0.0001;
+      osc.connect(gain).connect(ctx.destination);
+      var t0 = ctx.currentTime;
+      gain.gain.linearRampToValueAtTime(0.22, t0 + 0.3);
+      osc.start();
+      // Классическая «воющая» тревога — плавный подъём/спад частоты по кругу.
+      var phase = 0;
+      sirenLfoId = setInterval(function() {
+        var now = ctx.currentTime;
+        phase += 1;
+        var target = (phase % 2 === 0) ? 880 : 440;
+        osc.frequency.linearRampToValueAtTime(target, now + 0.9);
+      }, 900);
+      sirenOscillators.push(osc);
+      sirenGainNodes.push(gain);
+    } catch (err) { console.log('Siren start error:', err); }
+  }).catch(function(err) { console.log('AudioContext resume error:', err); });
 }
 
 function stopSiren(e) {
@@ -1118,7 +1164,9 @@ function stopSiren(e) {
       gain.gain.linearRampToValueAtTime(0.001, sirenCtx.currentTime + 0.1);
     } catch(err) {}
   });
-  if (sirenCtx) { setTimeout(function() { try { sirenCtx.close(); } catch(err) {} sirenCtx = null; }, 200); }
+  // AudioContext больше НЕ закрываем — он один на всю сессию страницы
+  // (пересоздание внутри setInterval было причиной бага с беззвучной тревогой,
+  // см. комментарий выше про triggerDangerAlarm/startSiren).
   sirenGainNodes = [];
   if (navigator.vibrate) navigator.vibrate(0);
 }
@@ -1151,8 +1199,20 @@ function triggerAllClear() {
   if (sirenLfoId) { clearInterval(sirenLfoId); sirenLfoId = null; }
   sirenOscillators.forEach(function(osc) { try { osc.stop(); } catch(err) {} });
   sirenOscillators = []; sirenGainNodes = [];
-  if (sirenCtx) { try { sirenCtx.close(); } catch(err) {} sirenCtx = null; }
   stopVibro();
+}
+
+// Тест-кнопка в настройках: реальный пользовательский клик, поэтому
+// гарантированно разблокирует звук/вибрацию и даёт услышать, как звучит тревога.
+function testSignal() {
+  isMuted = false;
+  document.getElementById('muteBtn').textContent = '🔊';
+  startSiren();
+  startVibro();
+  toast('🔊', 'Тестовый сигнал', 'Если звук/вибрация не сработали — проверьте тумблеры выше и громкость устройства');
+  setTimeout(function() {
+    if (!isMuted) { triggerAllClear(); document.getElementById('muteBtn').textContent = '🔇'; isMuted = true; }
+  }, 4000);
 }
 
 function showView(view) {
@@ -1215,6 +1275,7 @@ function initHandlers() {
 
   document.getElementById('savePushBtn').addEventListener('click', savePush);
   document.getElementById('laterBtn').addEventListener('click', closeModal);
+  document.getElementById('testSignalBtn').addEventListener('click', testSignal);
 
   var hideBtn = document.getElementById('hideInstallHintBtn');
   if (hideBtn) hideBtn.addEventListener('click', hideInstallHint);
