@@ -129,6 +129,25 @@ let analytics = loadJson(ANALYTICS_FILE, {
   browsers: {},             // { Chrome: n, Safari: n, ... }
   recent: []                // последние посещения [{t, path, ref, device, browser}]
 });
+// ВАЖНАЯ ПРАВКА: loadJson() при существующем файле возвращает его as-is, БЕЗ
+// подстановки дефолтных полей. Если analytics.json был создан более ранней
+// версией сервера и в нём не хватает, скажем, поля 'browsers' — recordVisit()
+// падал на первом же обращении к analytics.browsers[...] с TypeError, который
+// проглатывался try/catch. Из-за этого saveAnalyticsSoon() (последняя строка в
+// функции) не вызывалась вообще — новые визиты переставали сохраняться, и
+// вкладка «Статистика» в админке навсегда замирала на "—". Теперь недостающие
+// поля подставляются сразу после загрузки, самостоятельно "подлечивая" старый файл.
+analytics.totalVisits = analytics.totalVisits || 0;
+analytics.uniqueVisitors = Array.isArray(analytics.uniqueVisitors) ? analytics.uniqueVisitors : [];
+analytics.dailyCounts = analytics.dailyCounts || {};
+analytics.hourlyToday = analytics.hourlyToday || { day: null, hours: new Array(24).fill(0) };
+if (!Array.isArray(analytics.hourlyToday.hours) || analytics.hourlyToday.hours.length !== 24) {
+  analytics.hourlyToday = { day: null, hours: new Array(24).fill(0) };
+}
+analytics.referrers = analytics.referrers || {};
+analytics.devices = analytics.devices || { mobile: 0, desktop: 0, tablet: 0 };
+analytics.browsers = analytics.browsers || {};
+analytics.recent = Array.isArray(analytics.recent) ? analytics.recent : [];
 let analyticsDirty = false;
 function saveAnalyticsSoon() {
   analyticsDirty = true;
@@ -136,6 +155,38 @@ function saveAnalyticsSoon() {
 setInterval(() => {
   if (analyticsDirty) { saveJson(ANALYTICS_FILE, analytics); analyticsDirty = false; }
 }, 5000);
+
+// ===== Логи сервера (для вкладки «Логи» в админке) =====
+// Раньше при сбое (ошибка опроса канала, ошибка отправки push, необработанное
+// исключение в каком-либо API-роуте) единственным следом была строка в
+// консоли процесса — если админ не смотрел консоль хостинга в этот момент,
+// причина проблемы (например, почему статистика вдруг осталась пустой)
+// терялась безвозвратно. Теперь всё это ещё и пишется в лог-буфер, который
+// виден прямо в админке.
+const LOGS_FILE = path.join(DATA_DIR, 'logs.json');
+const MAX_LOGS = 500;
+let logs = loadJson(LOGS_FILE, []);
+let logsDirty = false;
+function addLog(level, message, meta) {
+  const entry = { t: Date.now(), level: level, message: String(message), meta: meta || null };
+  logs.push(entry);
+  if (logs.length > MAX_LOGS) logs = logs.slice(-MAX_LOGS);
+  logsDirty = true;
+  const prefix = level === 'error' ? '[ERROR]' : level === 'warn' ? '[WARN]' : '[INFO]';
+  console.log(prefix, message, meta ? JSON.stringify(meta) : '');
+}
+setInterval(() => {
+  if (logsDirty) { saveJson(LOGS_FILE, logs); logsDirty = false; }
+}, 5000);
+addLog('info', 'Сервер запускается');
+
+// Ловим то, что иначе молча уронило бы процесс без единой строки в логах.
+process.on('uncaughtException', (err) => {
+  addLog('error', 'Необработанное исключение: ' + err.message, { stack: err.stack });
+});
+process.on('unhandledRejection', (reason) => {
+  addLog('error', 'Необработанный отказ промиса: ' + (reason && reason.message ? reason.message : String(reason)));
+});
 
 // ===== Классификация сообщений =====
 // ВАЖНО: 'belgorod' проверяется ПЕРВЫМ и намеренно самый широкий (город + область
@@ -280,7 +331,7 @@ function recordVisit(req) {
 
     saveAnalyticsSoon();
   } catch (err) {
-    console.log('Ошибка учёта посещения:', err.message);
+    addLog('error', 'Ошибка учёта посещения: ' + err.message, { stack: err.stack });
   }
 }
 
@@ -391,7 +442,7 @@ async function pollOnce() {
         channelHealth[channel] = { ok: true, lastPollAt: Date.now(), lastError: null, count: msgs.length };
       } catch (err) {
         channelHealth[channel] = { ok: false, lastPollAt: Date.now(), lastError: err.message, count: 0 };
-        console.log(`Ошибка опроса канала @${channel}:`, err.message);
+        addLog('error', `Ошибка опроса канала @${channel}: ${err.message}`);
       }
     }
 
@@ -405,6 +456,7 @@ async function pollOnce() {
 
     if (newItems.length) {
       newItems.forEach((it) => { it.isNew = true; });
+      addLog('info', `Новых сообщений в ленте: ${newItems.length}`, { types: newItems.map((it) => it.t) });
       // помечаем как новые только первые несколько минут — на фронте это условно,
       // здесь просто фиксируем факт появления для push-рассылки
       for (const it of newItems) {
@@ -426,7 +478,7 @@ async function pollOnce() {
     lastPollAt = Date.now();
   } catch (err) {
     lastPollOk = false;
-    console.log('Ошибка опроса канала:', err.message);
+    addLog('error', 'Ошибка опроса канала: ' + err.message, { stack: err.stack });
   }
 }
 
@@ -460,7 +512,7 @@ async function notifySubscribers(item) {
         // подписка больше не действительна (пользователь отписался/удалил приложение) — удаляем
       } else {
         stillValid.push(entry);
-        console.log('Push error:', err.statusCode, err.message);
+        addLog('error', 'Ошибка отправки push: ' + err.statusCode + ' ' + err.message);
       }
     }
   }
@@ -532,51 +584,76 @@ function requireAdmin(req, res, next) {
 app.post('/api/admin/login', (req, res) => {
   const { password } = req.body || {};
   if (password !== ADMIN_PASSWORD) {
+    addLog('warn', 'Неудачная попытка входа в админку');
     return res.status(401).json({ error: 'wrong password' });
   }
   const token = crypto.randomBytes(24).toString('hex');
   adminSessions.set(token, Date.now() + SESSION_TTL_MS);
   saveSessions();
+  addLog('info', 'Успешный вход в админку');
   res.json({ token, expiresIn: SESSION_TTL_MS });
 });
 
 app.get('/api/admin/stats', requireAdmin, (req, res) => {
-  const feedByType = {};
-  state.feed.forEach((it) => { feedByType[it.t] = (feedByType[it.t] || 0) + 1; });
+  // Раньше этот роут ничем не был защищён от исключений — если, например,
+  // state.feed или analytics.* оказывались повреждены (не тот тип), сервер
+  // отвечал HTML-страницей ошибки Express вместо JSON. Админка ожидает
+  // JSON и на такой ответ падает в res.json() молча (см. apiGet) — итог:
+  // все цифры/графики просто остаются пустыми без единого сообщения об
+  // ошибке. Теперь любая проблема здесь: 1) не роняет ответ как HTML,
+  // 2) обязательно попадает в лог, который виден во вкладке «Логи».
+  try {
+    const feedByType = {};
+    (Array.isArray(state.feed) ? state.feed : []).forEach((it) => { feedByType[it.t] = (feedByType[it.t] || 0) + 1; });
 
-  const subsByRegion = {};
-  subscriptions.forEach((s) => {
-    (s.regions || []).forEach((r) => { subsByRegion[r] = (subsByRegion[r] || 0) + 1; });
-  });
+    const subsByRegion = {};
+    (Array.isArray(subscriptions) ? subscriptions : []).forEach((s) => {
+      (s.regions || []).forEach((r) => { subsByRegion[r] = (subsByRegion[r] || 0) + 1; });
+    });
 
-  res.json({
-    visits: {
-      total: analytics.totalVisits,
-      uniqueVisitors: analytics.uniqueVisitors.length,
-      today: analytics.dailyCounts[todayKey()] || 0,
-      dailyCounts: analytics.dailyCounts,
-      hourlyToday: analytics.hourlyToday,
-      referrers: analytics.referrers,
-      devices: analytics.devices,
-      browsers: analytics.browsers,
-      recent: analytics.recent.slice(0, 30)
-    },
-    subscribers: {
-      total: subscriptions.length,
-      byRegion: subsByRegion
-    },
-    feed: {
-      total: state.feed.length,
-      byType: feedByType
-    },
-    parser: {
-      ok: lastPollOk,
-      lastPollAt,
-      channels,
-      channelHealth
-    },
-    alarmConfig
-  });
+    res.json({
+      visits: {
+        total: analytics.totalVisits || 0,
+        uniqueVisitors: (analytics.uniqueVisitors || []).length,
+        today: (analytics.dailyCounts && analytics.dailyCounts[todayKey()]) || 0,
+        dailyCounts: analytics.dailyCounts || {},
+        hourlyToday: analytics.hourlyToday || { day: null, hours: new Array(24).fill(0) },
+        referrers: analytics.referrers || {},
+        devices: analytics.devices || {},
+        browsers: analytics.browsers || {},
+        recent: (analytics.recent || []).slice(0, 30)
+      },
+      subscribers: {
+        total: (subscriptions || []).length,
+        byRegion: subsByRegion
+      },
+      feed: {
+        total: (state.feed || []).length,
+        byType: feedByType
+      },
+      parser: {
+        ok: lastPollOk,
+        lastPollAt,
+        channels,
+        channelHealth
+      },
+      alarmConfig
+    });
+  } catch (err) {
+    addLog('error', 'Ошибка сборки статистики: ' + err.message, { stack: err.stack });
+    res.status(500).json({ error: 'stats build failed: ' + err.message });
+  }
+});
+
+// ===== Логи сервера =====
+app.get('/api/admin/logs', requireAdmin, (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 200, MAX_LOGS);
+  const level = req.query.level;
+  let out = logs;
+  if (level && ['info', 'warn', 'error'].includes(level)) {
+    out = out.filter((l) => l.level === level);
+  }
+  res.json({ logs: out.slice(-limit).reverse() });
 });
 
 // ===== Управление источниками (каналами) =====
@@ -600,6 +677,7 @@ app.post('/api/admin/channel-region', requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'invalid region' });
   }
   saveJson(CHANNEL_REGIONS_FILE, channelRegionOverride);
+  addLog('info', `Регион канала @${parsed} изменён на: ${region || 'auto'}`);
   res.json({ ok: true, channelRegions: channelRegionOverride });
 });
 
@@ -609,6 +687,7 @@ app.post('/api/admin/channels', requireAdmin, (req, res) => {
   if (channels.includes(parsed)) return res.status(409).json({ error: 'already added' });
   channels.push(parsed);
   saveJson(CHANNELS_FILE, channels);
+  addLog('info', `Добавлен канал-источник: @${parsed}`);
   pollOnce(); // сразу опросить новый канал, не дожидаясь следующего цикла
   res.json({ ok: true, channels });
 });
@@ -620,6 +699,7 @@ app.delete('/api/admin/channels', requireAdmin, (req, res) => {
   channels = channels.filter((c) => c.toLowerCase() !== parsed.toLowerCase());
   delete channelHealth[parsed];
   saveJson(CHANNELS_FILE, channels);
+  addLog('info', `Удалён канал-источник: @${parsed}`);
   res.json({ ok: true, channels });
 });
 
@@ -634,6 +714,7 @@ app.post('/api/admin/alarm-config', requireAdmin, (req, res) => {
   if (Array.isArray(regions)) alarmConfig.regions = regions;
   if (typeof enabled === 'boolean') alarmConfig.enabled = enabled;
   saveJson(ALARM_CONFIG_FILE, alarmConfig);
+  addLog('info', 'Настройки тревоги изменены', alarmConfig);
   res.json({ ok: true, alarmConfig });
 });
 
@@ -673,6 +754,40 @@ app.post('/api/admin/message', requireAdmin, async (req, res) => {
   state.feed.unshift(item);
   state.feed = state.feed.slice(0, 60);
   saveJson(STATE_FILE, state);
+  addLog('info', `Ручное сообщение отправлено в ленту: ${item.tag} (${item.region})`);
+  await notifySubscribers(item);
+  res.json({ ok: true, item });
+});
+
+// Быстрая тревога (РО/БПЛА) по конкретному району или по всей области —
+// аналог «Быстрого отбоя», чтобы не заполнять форму ручной отправки на каждый чих.
+const QUICK_ALERT_META = {
+  rocket: { i: '🚀', tag: 'Ракетная опасность', verb: 'Объявлена ракетная опасность' },
+  drone: { i: '🛸', tag: 'БПЛА обнаружен', verb: 'Обнаружен БПЛА' }
+};
+app.post('/api/admin/quick-alert', requireAdmin, async (req, res) => {
+  const { type, region, text } = req.body || {};
+  const meta = QUICK_ALERT_META[type];
+  if (!meta) return res.status(400).json({ error: 'type must be rocket or drone' });
+  const dt = new Date();
+  const regionLabel = (!region || region === 'all') ? 'по всей области' : (REGION_NAMES[region] || region);
+  const item = {
+    id: 'manual-quick-' + dt.getTime(),
+    t: type, i: meta.i, tag: meta.tag,
+    txt: text && text.trim() ? text.trim() : `${meta.verb} ${regionLabel === 'по всей области' ? regionLabel : '— ' + regionLabel}. Будьте бдительны, при сигнале сирены — в укрытие.`,
+    time: dt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' }),
+    date: dt.toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', timeZone: 'Europe/Moscow' }),
+    region: region || 'all',
+    isNew: true,
+    ts: dt.getTime(),
+    iso: dt.toISOString(),
+    hasRealTime: true,
+    manual: true
+  };
+  state.feed.unshift(item);
+  state.feed = state.feed.slice(0, 60);
+  saveJson(STATE_FILE, state);
+  addLog('info', `Быстрая тревога отправлена: ${meta.tag} (${item.region})`);
   await notifySubscribers(item);
   res.json({ ok: true, item });
 });
@@ -697,12 +812,39 @@ app.post('/api/admin/cancel', requireAdmin, async (req, res) => {
   state.feed.unshift(item);
   state.feed = state.feed.slice(0, 60);
   saveJson(STATE_FILE, state);
+  addLog('info', `Отбой отправлен (${region || 'all'})`);
   await notifySubscribers(item);
   res.json({ ok: true, item });
 });
 
+// Удаление записи из ленты (админка) — например, если ручное сообщение
+// отправлено по ошибке или устарело.
+app.delete('/api/admin/feed/:id', requireAdmin, (req, res) => {
+  const id = req.params.id;
+  const before = state.feed.length;
+  state.feed = (state.feed || []).filter((it) => String(it.id) !== String(id));
+  if (state.feed.length === before) return res.status(404).json({ error: 'not found' });
+  saveJson(STATE_FILE, state);
+  addLog('info', `Запись удалена из ленты: ${id}`);
+  res.json({ ok: true, feed: state.feed });
+});
+
+// ===== Глобальный обработчик ошибок =====
+// Без этого необработанное исключение в любом роуте отдаёт HTML-страницу
+// ошибки Express. Админка (admin.html) всегда ждёт JSON и на HTML-ответ
+// падает ТИХО (res.json() бросает исключение, пойманное пустым catch) —
+// именно так статистика могла молча оставаться пустой без единого
+// сообщения об ошибке на экране. Теперь любая такая ошибка: 1) всегда
+// отдаётся как JSON, 2) всегда попадает в лог (вкладка «Логи» в админке).
+app.use((err, req, res, next) => {
+  addLog('error', `Необработанная ошибка роута ${req.method} ${req.path}: ${err.message}`, { stack: err.stack });
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'internal error: ' + err.message });
+});
+
 app.listen(PORT, () => {
   console.log(`Тревога · Белгород — сервер запущен на порту ${PORT}`);
+  addLog('info', `Сервер запущен на порту ${PORT}`);
   pollOnce();
   setInterval(pollOnce, POLL_MS);
 });
