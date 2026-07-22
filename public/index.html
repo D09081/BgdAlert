@@ -448,6 +448,17 @@
     display: flex; justify-content: space-around;
     padding: 8px 0 calc(8px + env(safe-area-inset-bottom));
     z-index: 200;
+    /* На iOS Safari position:fixed иногда "отстаёт" от скролла и на кадр-два
+       зависает посреди страницы вместо низа экрана — особенно при быстрой
+       прокрутке (виден на скриншоте: панель "Лента/Укрытия/Правила" оказалась
+       в середине ленты). Явный перевод элемента на отдельный GPU-слой
+       заставляет Safari перекомпоновывать его на каждый кадр вместе со
+       скроллом, а не с задержкой. */
+    -webkit-transform: translateZ(0);
+    transform: translateZ(0);
+    will-change: transform;
+    -webkit-backface-visibility: hidden;
+    backface-visibility: hidden;
   }
   .nav-btn {
     flex: 1; display: flex; flex-direction: column;
@@ -1083,7 +1094,8 @@ function toast(icon, title, text) {
 //  4) кнопка «Проверить сигнал» в настройках даёт пользователю проверить,
 //     что всё работает, и заодно гарантированно разблокирует звук на iOS,
 //     где resume() один без реального проигрывания звука иногда не срабатывает.
-var sirenCtx = null, sirenOscillators = [], sirenGainNodes = [], sirenLfoId = null, isMuted = false;
+var sirenCtx = null, sirenOscillators = [], sirenGainNodes = [], isMuted = false;
+var sirenActive = false, sirenTimeoutId = null, sirenTimeoutId2 = null;
 var audioUnlocked = false;
 
 function soundEnabled() { return document.getElementById('swSound').classList.contains('on'); }
@@ -1122,84 +1134,112 @@ document.addEventListener('touchstart', unlockAudio, { once: false, passive: tru
 
 function startSiren() {
   if (!soundEnabled() || isMuted) return;
-  if (sirenLfoId) return; // уже играет
+  if (sirenActive) return; // уже играет
   var ctx = getSirenCtx();
   if (!ctx) return;
   var afterResume = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve();
   afterResume.then(function() {
-    try {
-      var osc = ctx.createOscillator();
-      var gain = ctx.createGain();
-      osc.type = 'sine';
-      gain.gain.value = 0.0001;
-      osc.connect(gain).connect(ctx.destination);
-      var t0 = ctx.currentTime;
-      gain.gain.linearRampToValueAtTime(0.22, t0 + 0.3);
-      osc.start();
-      // Классическая «воющая» тревога — плавный подъём/спад частоты по кругу.
-      var phase = 0;
-      sirenLfoId = setInterval(function() {
-        var now = ctx.currentTime;
-        phase += 1;
-        var target = (phase % 2 === 0) ? 880 : 440;
-        osc.frequency.linearRampToValueAtTime(target, now + 0.9);
-      }, 900);
-      sirenOscillators.push(osc);
-      sirenGainNodes.push(gain);
-    } catch (err) { console.log('Siren start error:', err); }
+    sirenActive = true;
+    runSirenCycle(0);
   }).catch(function(err) { console.log('AudioContext resume error:', err); });
+}
+
+// Тревожный сигнал: 3 гудка по 3 секунды подряд (с короткой паузой между
+// ними), затем пауза 4 секунды и цикл повторяется — пока не нажат «отбой»/mute.
+// Раньше сирена была одним непрерывным воем; теперь — узнаваемый прерывистый
+// сигнал (как классическая сирена гражданской обороны), и вибрация точно
+// синхронизирована с каждым из трёх гудков, а не идёт отдельным таймером.
+var BURST_DURATION_S = 3;
+var GAP_BETWEEN_BURSTS_MS = 700;
+var GAP_BETWEEN_CYCLES_MS = 4000;
+
+function runSirenCycle(burstIndex) {
+  if (!sirenActive) return;
+  if (burstIndex >= 3) {
+    sirenTimeoutId = setTimeout(function() { runSirenCycle(0); }, GAP_BETWEEN_CYCLES_MS);
+    return;
+  }
+  playOneBurst(function() {
+    if (!sirenActive) return;
+    sirenTimeoutId = setTimeout(function() { runSirenCycle(burstIndex + 1); }, GAP_BETWEEN_BURSTS_MS);
+  });
+}
+
+function playOneBurst(onDone) {
+  var ctx = sirenCtx;
+  if (!ctx) { onDone(); return; }
+  try {
+    var osc = ctx.createOscillator();
+    var gain = ctx.createGain();
+    osc.type = 'sine';
+    var t0 = ctx.currentTime;
+    var dur = BURST_DURATION_S;
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.linearRampToValueAtTime(0.22, t0 + 0.15);
+    // Воющий подъём/спад частоты внутри одного гудка — узнаваемый звук тревоги.
+    osc.frequency.setValueAtTime(440, t0);
+    osc.frequency.linearRampToValueAtTime(880, t0 + dur / 2);
+    osc.frequency.linearRampToValueAtTime(440, t0 + dur);
+    gain.gain.setValueAtTime(0.22, t0 + dur - 0.15);
+    gain.gain.linearRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.05);
+    sirenOscillators.push(osc);
+    sirenGainNodes.push(gain);
+  } catch (err) { console.log('Siren burst error:', err); }
+  // Вибрация — синхронно с этим же гудком, той же длительности.
+  // ВАЖНО: Vibration API (navigator.vibrate) в принципе НЕ поддерживается в
+  // Safari на iPhone/iPad — это ограничение самой Apple, а не баг сайта.
+  // На iOS вибрация при реальной тревоге возможна только через системный
+  // haptic, который iOS сама даёт при показе push-уведомления — управлять
+  // его длительностью/паттерном из JS на iPhone невозможно.
+  if (vibroEnabled() && navigator.vibrate) {
+    try { navigator.vibrate(dur * 1000); } catch (err) {}
+  }
+  sirenTimeoutId2 = setTimeout(onDone, dur * 1000);
+}
+
+function stopSirenLoop() {
+  sirenActive = false;
+  if (sirenTimeoutId) { clearTimeout(sirenTimeoutId); sirenTimeoutId = null; }
+  if (sirenTimeoutId2) { clearTimeout(sirenTimeoutId2); sirenTimeoutId2 = null; }
+  sirenOscillators.forEach(function(osc) { try { osc.stop(); } catch (err) {} });
+  sirenOscillators = [];
+  sirenGainNodes = [];
+  if (navigator.vibrate) { try { navigator.vibrate(0); } catch (err) {} }
 }
 
 function stopSiren(e) {
   if (e) e.stopPropagation();
   isMuted = true;
   document.getElementById('muteBtn').textContent = '🔇';
-  if (sirenLfoId) { clearInterval(sirenLfoId); sirenLfoId = null; }
-  sirenOscillators.forEach(function(osc) { try { osc.stop(); } catch(err) {} });
-  sirenOscillators = [];
-  sirenGainNodes.forEach(function(gain) {
-    try {
-      gain.gain.cancelScheduledValues(sirenCtx.currentTime);
-      gain.gain.setValueAtTime(gain.gain.value, sirenCtx.currentTime);
-      gain.gain.linearRampToValueAtTime(0.001, sirenCtx.currentTime + 0.1);
-    } catch(err) {}
-  });
-  // AudioContext больше НЕ закрываем — он один на всю сессию страницы
-  // (пересоздание внутри setInterval было причиной бага с беззвучной тревогой,
-  // см. комментарий выше про triggerDangerAlarm/startSiren).
-  sirenGainNodes = [];
-  if (navigator.vibrate) navigator.vibrate(0);
+  // РАНЬШЕ здесь глушился только текущий звучащий гудок — цикл runSirenCycle
+  // оставался "живым" (sirenActive не сбрасывался), и через 700 мс / 4 сек
+  // следующий гудок всё равно запускался заново, будто кнопка mute не
+  // сработала. stopSirenLoop() отменяет и текущий звук, и все запланированные
+  // таймеры следующих гудков.
+  stopSirenLoop();
 }
 
-// Шаблон вибрации для реальной атаки — повторяется, пока не подтверждён отбой/mute.
-var vibroTimerId = null;
-function startVibro() {
-  if (!vibroEnabled() || !navigator.vibrate || isMuted) return;
-  navigator.vibrate([400, 150, 400, 150, 600]);
-  if (vibroTimerId) clearInterval(vibroTimerId);
-  vibroTimerId = setInterval(function() {
-    if (isMuted || !vibroEnabled()) { clearInterval(vibroTimerId); vibroTimerId = null; return; }
-    navigator.vibrate([400, 150, 400, 150, 600]);
-  }, 4000);
-}
-function stopVibro() {
-  if (vibroTimerId) { clearInterval(vibroTimerId); vibroTimerId = null; }
-  if (navigator.vibrate) navigator.vibrate(0);
-}
+// Вибрация теперь встроена прямо в playOneBurst() выше — отдельного
+// таймера вибрации больше нет (два независимых navigator.vibrate()
+// конфликтовали друг с другом).
 
 // Вызывается при появлении новой активной угрозы (ракета/БПЛА) в ленте.
 function triggerDangerAlarm() {
   isMuted = false;
   document.getElementById('muteBtn').textContent = '🔊';
   startSiren();
-  startVibro();
+  // Вибрация теперь встроена в playOneBurst() — синхронна с каждым из трёх
+  // гудков сирены. Отдельный startVibro() с собственным таймером раньше
+  // запускал вибрацию по своему графику, независимо от гудков сирены — два
+  // вызова navigator.vibrate() конфликтовали (каждый новый вызов обрывает
+  // предыдущий), из-за чего вибрация ощущалась рваной/непредсказуемой.
 }
 // Вызывается при отбое — глушим и сирену, и вибрацию.
 function triggerAllClear() {
-  if (sirenLfoId) { clearInterval(sirenLfoId); sirenLfoId = null; }
-  sirenOscillators.forEach(function(osc) { try { osc.stop(); } catch(err) {} });
-  sirenOscillators = []; sirenGainNodes = [];
-  stopVibro();
+  stopSirenLoop();
 }
 
 // Тест-кнопка в настройках: реальный пользовательский клик, поэтому
@@ -1208,11 +1248,14 @@ function testSignal() {
   isMuted = false;
   document.getElementById('muteBtn').textContent = '🔊';
   startSiren();
-  startVibro();
-  toast('🔊', 'Тестовый сигнал', 'Если звук/вибрация не сработали — проверьте тумблеры выше и громкость устройства');
+  toast('🔊', 'Тестовый сигнал', 'Полный цикл — 3 гудка по 3 секунды. Если не сработало — проверьте тумблеры выше и громкость устройства');
+  // Полный цикл = 3 гудка × 3 сек + 2 паузы по 0.7 сек между ними ≈ 10.4 сек.
+  // Раньше тест обрывался через 4 сек — на середине второго гудка, и
+  // проверить весь новый паттерн "3×3 сек" было невозможно.
+  var fullCycleMs = 3 * BURST_DURATION_S * 1000 + 2 * GAP_BETWEEN_BURSTS_MS + 500;
   setTimeout(function() {
     if (!isMuted) { triggerAllClear(); document.getElementById('muteBtn').textContent = '🔇'; isMuted = true; }
-  }, 4000);
+  }, fullCycleMs);
 }
 
 function showView(view) {
