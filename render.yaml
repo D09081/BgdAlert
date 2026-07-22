@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: belgorod-alert
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/feed
+    envVars:
+      # Render сам сгенерирует надёжный случайный пароль ОДИН РАЗ и сохранит
+      # его у себя (в отличие от файла на диске — не потеряется при редеплое).
+      # Посмотреть значение: Render Dashboard → сервис → Environment.
+      - key: ADMIN_PASSWORD
+        generateValue: true
+      # Ключи Web Push — сгенерируйте один раз локально командой
+      #   npx web-push generate-vapid-keys
+      # и вставьте сюда значения в Render Dashboard → Environment
+      # (sync: false = Render не будет требовать значение при первом деплое,
+      # но БЕЗ них push-уведомления работать не будут).
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: NODE_VERSION
+        value: 20.11.0
+    # Персистентный диск — ОПЦИОНАЛЬНО и требует платного инстанс-типа на Render
+    # (на бесплатном тарифе недоступен). Без него папка data/ (лента, подписки,
+    # логи, статистика) очищается при каждом новом деплое — это не страшно для
+    # ADMIN_PASSWORD/VAPID (они теперь в Environment, не на диске), но лента и
+    # статистика посещений при передеплое обнулятся. Если нужно, чтобы не
+    # обнулялись — раскомментируйте блок ниже и переключитесь на платный план:
+    # disk:
+    #   name: belgorod-alert-data
+    #   mountPath: /opt/render/project/src/data
+    #   sizeGB: 1
