@@ -104,6 +104,138 @@ function saveJson(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf-8');
 }
 let subscriptions = loadJson(SUBS_FILE, []); // [{ subscription, regions, sound, vibro }]
+
+// ===== Telegram-бот — резервный канал доставки, не зависящий от Google/Apple push =====
+// Задайте TELEGRAM_BOT_TOKEN (получить у @BotFather в Telegram) и TELEGRAM_BOT_USERNAME
+// (без @, например trevoga_belgorod_bot) в переменных окружения хостинга — без них
+// бот просто не запускается, остальной сайт работает как обычно.
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || '';
+const TG_API = TELEGRAM_BOT_TOKEN ? `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}` : null;
+const TG_SUBS_FILE = path.join(DATA_DIR, 'telegram-subs.json');
+let tgSubscriptions = loadJson(TG_SUBS_FILE, []); // [{ chatId, regions: ['all'], joinedAt }]
+
+function saveTgSubs() { saveJson(TG_SUBS_FILE, tgSubscriptions); }
+
+async function tgCall(method, params) {
+  if (!TG_API) return null;
+  try {
+    const res = await axios.post(`${TG_API}/${method}`, params, { timeout: 10000 });
+    return res.data;
+  } catch (err) {
+    addLog('error', `Telegram API ошибка (${method}): ` + (err.response?.data?.description || err.message));
+    return null;
+  }
+}
+
+function regionKeyboard(prefix) {
+  const rows = [[{ text: '🌍 Вся область', callback_data: `${prefix}:all` }]];
+  const regionEntries = Object.entries(REGION_NAMES);
+  for (let i = 0; i < regionEntries.length; i += 2) {
+    const row = [{ text: regionEntries[i][1], callback_data: `${prefix}:${regionEntries[i][0]}` }];
+    if (regionEntries[i + 1]) row.push({ text: regionEntries[i + 1][1], callback_data: `${prefix}:${regionEntries[i + 1][0]}` });
+    rows.push(row);
+  }
+  return { inline_keyboard: rows };
+}
+
+async function tgHandleUpdate(update) {
+  try {
+    if (update.callback_query) {
+      const cq = update.callback_query;
+      const chatId = cq.message.chat.id;
+      const data = cq.data || '';
+      if (data.startsWith('tgregion:')) {
+        const region = data.slice('tgregion:'.length);
+        const idx = tgSubscriptions.findIndex((s) => s.chatId === chatId);
+        const entry = { chatId, regions: [region], joinedAt: idx >= 0 ? tgSubscriptions[idx].joinedAt : Date.now() };
+        if (idx >= 0) tgSubscriptions[idx] = entry; else tgSubscriptions.push(entry);
+        saveTgSubs();
+        const label = region === 'all' ? 'вся область' : (REGION_NAMES[region] || region);
+        await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: `Район выбран: ${label}` });
+        await tgCall('editMessageText', {
+          chat_id: chatId, message_id: cq.message.message_id,
+          text: `✅ Подписка настроена — район: *${label}*\n\nТы будешь получать сообщение здесь при каждой ракетной опасности, обнаружении БПЛА и отбое тревоги. Изменить район — /region. Отписаться — /stop.`,
+          parse_mode: 'Markdown'
+        });
+        addLog('info', `Telegram: подписка настроена, район ${region}`);
+      }
+      return;
+    }
+    const msg = update.message;
+    if (!msg || !msg.text) return;
+    const chatId = msg.chat.id;
+    const text = msg.text.trim();
+    if (text === '/start' || text.startsWith('/start ')) {
+      const idx = tgSubscriptions.findIndex((s) => s.chatId === chatId);
+      if (idx < 0) { tgSubscriptions.push({ chatId, regions: ['all'], joinedAt: Date.now() }); saveTgSubs(); addLog('info', 'Telegram: новый подписчик ' + chatId); }
+      await tgCall('sendMessage', {
+        chat_id: chatId,
+        text: '🚨 *Тревога Белгород* — оповещения о ракетной опасности и БПЛА.\n\nПо умолчанию включена вся область. Выбери свой район, если нужны только его оповещения:',
+        parse_mode: 'Markdown',
+        reply_markup: regionKeyboard('tgregion')
+      });
+    } else if (text === '/region') {
+      await tgCall('sendMessage', { chat_id: chatId, text: 'Выбери район:', reply_markup: regionKeyboard('tgregion') });
+    } else if (text === '/stop') {
+      tgSubscriptions = tgSubscriptions.filter((s) => s.chatId !== chatId);
+      saveTgSubs();
+      await tgCall('sendMessage', { chat_id: chatId, text: '🔕 Подписка отключена. Вернуться можно командой /start.' });
+      addLog('info', 'Telegram: отписка ' + chatId);
+    } else {
+      await tgCall('sendMessage', { chat_id: chatId, text: 'Команды: /start — подписаться, /region — выбрать район, /stop — отписаться.' });
+    }
+  } catch (err) {
+    addLog('error', 'Ошибка обработки Telegram-апдейта: ' + err.message, { stack: err.stack });
+  }
+}
+
+// Long polling — не требует публичного HTTPS-вебхука и лишней настройки,
+// работает "из коробки" сразу после того как задан TELEGRAM_BOT_TOKEN.
+let tgOffset = 0;
+async function tgPollLoop() {
+  if (!TG_API) return;
+  try {
+    const data = await tgCall('getUpdates', { offset: tgOffset, timeout: 25 });
+    if (data && data.ok && Array.isArray(data.result)) {
+      for (const update of data.result) {
+        tgOffset = update.update_id + 1;
+        await tgHandleUpdate(update);
+      }
+    }
+  } catch (err) {
+    addLog('error', 'Ошибка Telegram long polling: ' + err.message);
+    await new Promise((r) => setTimeout(r, 3000)); // не долбить API при постоянной ошибке
+  }
+  setImmediate(tgPollLoop);
+}
+if (TG_API) {
+  tgPollLoop();
+  addLog('info', 'Telegram-бот запущен (long polling)');
+} else {
+  console.log('[i] TELEGRAM_BOT_TOKEN не задан — Telegram-канал оповещений отключён (сайт и push работают как обычно).');
+}
+
+async function notifyTelegramSubscribers(item) {
+  if (!TG_API || !tgSubscriptions.length) return;
+  const isUrgent = isAlarmTriggering(item);
+  const regionLabel = item.region === 'all' ? 'по всей области' : (REGION_NAMES[item.region] || item.region);
+  const title = isUrgent ? `🚨 *ТРЕВОГА* · ${regionLabel}` : `${item.i} *${item.tag}*`;
+  const text = `${title}\n\n${item.txt}\n\n_${item.time} · ${item.date}_`;
+  const stillValid = [];
+  for (const entry of tgSubscriptions) {
+    const matches = item.region === 'all' || (entry.regions && (entry.regions.includes('all') || entry.regions.includes(item.region)));
+    if (!matches) { stillValid.push(entry); continue; }
+    const result = await tgCall('sendMessage', { chat_id: entry.chatId, text, parse_mode: 'Markdown' });
+    // Код 403 = пользователь заблокировал бота — удаляем такого подписчика,
+    // как это уже делается для "умерших" web push подписок (404/410).
+    if (result === null) { /* сетевая/временная ошибка — не удаляем, оставляем как есть */ stillValid.push(entry); }
+    else if (result.ok === false && result.error_code === 403) { addLog('info', `Telegram: подписчик ${entry.chatId} заблокировал бота, удалён из списка`); }
+    else stillValid.push(entry);
+  }
+  tgSubscriptions = stillValid;
+  saveTgSubs();
+}
 let state = loadJson(STATE_FILE, { seenIds: [], feed: [] });
 let channels = loadJson(CHANNELS_FILE, ['mchs31', 'LiveOnlain']);
 if (!fs.existsSync(CHANNELS_FILE)) saveJson(CHANNELS_FILE, channels);
@@ -540,6 +672,7 @@ async function notifySubscribers(item) {
   }
   subscriptions = stillValid;
   saveJson(SUBS_FILE, subscriptions);
+  await notifyTelegramSubscribers(item);
 }
 
 // ===== Express API =====
@@ -568,6 +701,10 @@ app.get('/api/feed', (req, res) => {
 
 app.get('/api/vapid-public-key', (req, res) => {
   res.json({ publicKey: VAPID_PUBLIC_KEY });
+});
+
+app.get('/api/telegram-config', (req, res) => {
+  res.json({ botUsername: TELEGRAM_BOT_USERNAME || null });
 });
 
 app.post('/api/subscribe', (req, res) => {
@@ -647,7 +784,8 @@ app.get('/api/admin/stats', requireAdmin, (req, res) => {
       },
       subscribers: {
         total: (subscriptions || []).length,
-        byRegion: subsByRegion
+        byRegion: subsByRegion,
+        telegram: (tgSubscriptions || []).length
       },
       feed: {
         total: (state.feed || []).length,
