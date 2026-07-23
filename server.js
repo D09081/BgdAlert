@@ -105,137 +105,6 @@ function saveJson(file, data) {
 }
 let subscriptions = loadJson(SUBS_FILE, []); // [{ subscription, regions, sound, vibro }]
 
-// ===== Telegram-бот — резервный канал доставки, не зависящий от Google/Apple push =====
-// Задайте TELEGRAM_BOT_TOKEN (получить у @BotFather в Telegram) и TELEGRAM_BOT_USERNAME
-// (без @, например trevoga_belgorod_bot) в переменных окружения хостинга — без них
-// бот просто не запускается, остальной сайт работает как обычно.
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || '';
-const TG_API = TELEGRAM_BOT_TOKEN ? `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}` : null;
-const TG_SUBS_FILE = path.join(DATA_DIR, 'telegram-subs.json');
-let tgSubscriptions = loadJson(TG_SUBS_FILE, []); // [{ chatId, regions: ['all'], joinedAt }]
-
-function saveTgSubs() { saveJson(TG_SUBS_FILE, tgSubscriptions); }
-
-async function tgCall(method, params) {
-  if (!TG_API) return null;
-  try {
-    const res = await axios.post(`${TG_API}/${method}`, params, { timeout: 10000 });
-    return res.data;
-  } catch (err) {
-    addLog('error', `Telegram API ошибка (${method}): ` + (err.response?.data?.description || err.message));
-    return null;
-  }
-}
-
-function regionKeyboard(prefix) {
-  const rows = [[{ text: '🌍 Вся область', callback_data: `${prefix}:all` }]];
-  const regionEntries = Object.entries(REGION_NAMES);
-  for (let i = 0; i < regionEntries.length; i += 2) {
-    const row = [{ text: regionEntries[i][1], callback_data: `${prefix}:${regionEntries[i][0]}` }];
-    if (regionEntries[i + 1]) row.push({ text: regionEntries[i + 1][1], callback_data: `${prefix}:${regionEntries[i + 1][0]}` });
-    rows.push(row);
-  }
-  return { inline_keyboard: rows };
-}
-
-async function tgHandleUpdate(update) {
-  try {
-    if (update.callback_query) {
-      const cq = update.callback_query;
-      const chatId = cq.message.chat.id;
-      const data = cq.data || '';
-      if (data.startsWith('tgregion:')) {
-        const region = data.slice('tgregion:'.length);
-        const idx = tgSubscriptions.findIndex((s) => s.chatId === chatId);
-        const entry = { chatId, regions: [region], joinedAt: idx >= 0 ? tgSubscriptions[idx].joinedAt : Date.now() };
-        if (idx >= 0) tgSubscriptions[idx] = entry; else tgSubscriptions.push(entry);
-        saveTgSubs();
-        const label = region === 'all' ? 'вся область' : (REGION_NAMES[region] || region);
-        await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: `Район выбран: ${label}` });
-        await tgCall('editMessageText', {
-          chat_id: chatId, message_id: cq.message.message_id,
-          text: `✅ Подписка настроена — район: *${label}*\n\nТы будешь получать сообщение здесь при каждой ракетной опасности, обнаружении БПЛА и отбое тревоги. Изменить район — /region. Отписаться — /stop.`,
-          parse_mode: 'Markdown'
-        });
-        addLog('info', `Telegram: подписка настроена, район ${region}`);
-      }
-      return;
-    }
-    const msg = update.message;
-    if (!msg || !msg.text) return;
-    const chatId = msg.chat.id;
-    const text = msg.text.trim();
-    if (text === '/start' || text.startsWith('/start ')) {
-      const idx = tgSubscriptions.findIndex((s) => s.chatId === chatId);
-      if (idx < 0) { tgSubscriptions.push({ chatId, regions: ['all'], joinedAt: Date.now() }); saveTgSubs(); addLog('info', 'Telegram: новый подписчик ' + chatId); }
-      await tgCall('sendMessage', {
-        chat_id: chatId,
-        text: '🚨 *Тревога Белгород* — оповещения о ракетной опасности и БПЛА.\n\nПо умолчанию включена вся область. Выбери свой район, если нужны только его оповещения:',
-        parse_mode: 'Markdown',
-        reply_markup: regionKeyboard('tgregion')
-      });
-    } else if (text === '/region') {
-      await tgCall('sendMessage', { chat_id: chatId, text: 'Выбери район:', reply_markup: regionKeyboard('tgregion') });
-    } else if (text === '/stop') {
-      tgSubscriptions = tgSubscriptions.filter((s) => s.chatId !== chatId);
-      saveTgSubs();
-      await tgCall('sendMessage', { chat_id: chatId, text: '🔕 Подписка отключена. Вернуться можно командой /start.' });
-      addLog('info', 'Telegram: отписка ' + chatId);
-    } else {
-      await tgCall('sendMessage', { chat_id: chatId, text: 'Команды: /start — подписаться, /region — выбрать район, /stop — отписаться.' });
-    }
-  } catch (err) {
-    addLog('error', 'Ошибка обработки Telegram-апдейта: ' + err.message, { stack: err.stack });
-  }
-}
-
-// Long polling — не требует публичного HTTPS-вебхука и лишней настройки,
-// работает "из коробки" сразу после того как задан TELEGRAM_BOT_TOKEN.
-let tgOffset = 0;
-async function tgPollLoop() {
-  if (!TG_API) return;
-  try {
-    const data = await tgCall('getUpdates', { offset: tgOffset, timeout: 25 });
-    if (data && data.ok && Array.isArray(data.result)) {
-      for (const update of data.result) {
-        tgOffset = update.update_id + 1;
-        await tgHandleUpdate(update);
-      }
-    }
-  } catch (err) {
-    addLog('error', 'Ошибка Telegram long polling: ' + err.message);
-    await new Promise((r) => setTimeout(r, 3000)); // не долбить API при постоянной ошибке
-  }
-  setImmediate(tgPollLoop);
-}
-if (TG_API) {
-  tgPollLoop();
-  addLog('info', 'Telegram-бот запущен (long polling)');
-} else {
-  console.log('[i] TELEGRAM_BOT_TOKEN не задан — Telegram-канал оповещений отключён (сайт и push работают как обычно).');
-}
-
-async function notifyTelegramSubscribers(item) {
-  if (!TG_API || !tgSubscriptions.length) return;
-  const isUrgent = isAlarmTriggering(item);
-  const regionLabel = item.region === 'all' ? 'по всей области' : (REGION_NAMES[item.region] || item.region);
-  const title = isUrgent ? `🚨 *ТРЕВОГА* · ${regionLabel}` : `${item.i} *${item.tag}*`;
-  const text = `${title}\n\n${item.txt}\n\n_${item.time} · ${item.date}_`;
-  const stillValid = [];
-  for (const entry of tgSubscriptions) {
-    const matches = item.region === 'all' || (entry.regions && (entry.regions.includes('all') || entry.regions.includes(item.region)));
-    if (!matches) { stillValid.push(entry); continue; }
-    const result = await tgCall('sendMessage', { chat_id: entry.chatId, text, parse_mode: 'Markdown' });
-    // Код 403 = пользователь заблокировал бота — удаляем такого подписчика,
-    // как это уже делается для "умерших" web push подписок (404/410).
-    if (result === null) { /* сетевая/временная ошибка — не удаляем, оставляем как есть */ stillValid.push(entry); }
-    else if (result.ok === false && result.error_code === 403) { addLog('info', `Telegram: подписчик ${entry.chatId} заблокировал бота, удалён из списка`); }
-    else stillValid.push(entry);
-  }
-  tgSubscriptions = stillValid;
-  saveTgSubs();
-}
 let state = loadJson(STATE_FILE, { seenIds: [], feed: [] });
 let channels = loadJson(CHANNELS_FILE, ['mchs31', 'LiveOnlain']);
 if (!fs.existsSync(CHANNELS_FILE)) saveJson(CHANNELS_FILE, channels);
@@ -333,6 +202,273 @@ setInterval(() => {
   if (logsDirty) { saveJson(LOGS_FILE, logs); logsDirty = false; }
 }, 5000);
 addLog('info', 'Сервер запускается');
+
+// ===== Telegram-бот — резервный канал доставки, не зависящий от Google/Apple push =====
+// Задайте TELEGRAM_BOT_TOKEN (получить у @BotFather в Telegram) и TELEGRAM_BOT_USERNAME
+// (без @, например trevoga_belgorod_bot) в переменных окружения хостинга — без них
+// бот просто не запускается, остальной сайт работает как обычно.
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || '';
+const TG_API = TELEGRAM_BOT_TOKEN ? `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}` : null;
+const TG_SUBS_FILE = path.join(DATA_DIR, 'telegram-subs.json');
+let tgSubscriptions = loadJson(TG_SUBS_FILE, []); // [{ chatId, regions: ['all'], joinedAt }]
+const TG_ADMINS_FILE = path.join(DATA_DIR, 'telegram-admins.json');
+let tgAdmins = loadJson(TG_ADMINS_FILE, []); // [chatId, ...] — чаты, прошедшие /admin <пароль>
+function saveTgAdmins() { saveJson(TG_ADMINS_FILE, tgAdmins); }
+function isTgAdmin(chatId) { return tgAdmins.includes(chatId); }
+
+function saveTgSubs() { saveJson(TG_SUBS_FILE, tgSubscriptions); }
+
+async function tgCall(method, params) {
+  if (!TG_API) return null;
+  try {
+    const res = await axios.post(`${TG_API}/${method}`, params, { timeout: 10000 });
+    return res.data;
+  } catch (err) {
+    addLog('error', `Telegram API ошибка (${method}): ` + (err.response?.data?.description || err.message));
+    return null;
+  }
+}
+
+function regionKeyboard(prefix) {
+  const rows = [[{ text: '🌍 Вся область', callback_data: `${prefix}:all` }]];
+  const regionEntries = Object.entries(REGION_NAMES);
+  for (let i = 0; i < regionEntries.length; i += 2) {
+    const row = [{ text: regionEntries[i][1], callback_data: `${prefix}:${regionEntries[i][0]}` }];
+    if (regionEntries[i + 1]) row.push({ text: regionEntries[i + 1][1], callback_data: `${prefix}:${regionEntries[i + 1][0]}` });
+    rows.push(row);
+  }
+  return { inline_keyboard: rows };
+}
+
+function alertTypeKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '🚀 Ракетная опасность', callback_data: 'tga:type:rocket' }],
+      [{ text: '🛸 БПЛА', callback_data: 'tga:type:drone' }],
+      [{ text: '✅ Отбой', callback_data: 'tga:type:cancel' }]
+    ]
+  };
+}
+
+function alertRegionKeyboard(type) {
+  const rows = [[{ text: '🌍 Вся область', callback_data: `tga:go:${type}:all` }]];
+  const regionEntries = Object.entries(REGION_NAMES);
+  for (let i = 0; i < regionEntries.length; i += 2) {
+    const row = [{ text: regionEntries[i][1], callback_data: `tga:go:${type}:${regionEntries[i][0]}` }];
+    if (regionEntries[i + 1]) row.push({ text: regionEntries[i + 1][1], callback_data: `tga:go:${type}:${regionEntries[i + 1][0]}` });
+    rows.push(row);
+  }
+  rows.push([{ text: '⬅️ Назад', callback_data: 'tga:back' }]);
+  return { inline_keyboard: rows };
+}
+
+// Тот же набор данных, что видит админ на сайте (вкладка «Статистика») —
+// собран в текстовом виде для Telegram, чтобы не заходить на сайт с телефона.
+function buildAdminStatsText() {
+  const feedByType = {};
+  (Array.isArray(state.feed) ? state.feed : []).forEach((it) => { feedByType[it.t] = (feedByType[it.t] || 0) + 1; });
+  const subsByRegion = {};
+  (Array.isArray(subscriptions) ? subscriptions : []).forEach((s) => {
+    (s.regions || []).forEach((r) => { subsByRegion[r] = (subsByRegion[r] || 0) + 1; });
+  });
+  const recentErrors = logs.filter((l) => l.level === 'error').slice(-5);
+  const lines = [];
+  lines.push('📊 *Статистика*');
+  lines.push('');
+  lines.push(`👁 Визитов всего: *${analytics.totalVisits || 0}*`);
+  lines.push(`👤 Уникальных посетителей: *${(analytics.uniqueVisitors || []).length}*`);
+  lines.push(`📅 Визитов сегодня: *${(analytics.dailyCounts && analytics.dailyCounts[todayKey()]) || 0}*`);
+  lines.push('');
+  lines.push(`🔔 Подписчиков push: *${subscriptions.length}*`);
+  lines.push(`✈️ Подписчиков Telegram: *${tgSubscriptions.length}*`);
+  lines.push('');
+  lines.push(`📰 Записей в ленте: *${state.feed.length}*`);
+  Object.entries(feedByType).forEach(([t, n]) => lines.push(`  • ${t}: ${n}`));
+  lines.push('');
+  lines.push(`📡 Парсер каналов: ${lastPollOk ? '✅ работает' : '⚠️ ошибка'}`);
+  lines.push(`   Последний опрос: ${lastPollAt ? new Date(lastPollAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—'}`);
+  lines.push(`   Каналы: ${channels.join(', ')}`);
+  lines.push('');
+  lines.push(`⚙️ Тревога включена: ${alarmConfig.enabled ? 'да' : 'нет'}, типы: ${alarmConfig.types.join(', ')}`);
+  if (recentErrors.length) {
+    lines.push('');
+    lines.push('🔴 Последние ошибки в логах:');
+    recentErrors.forEach((l) => lines.push(`  • ${new Date(l.t).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' })} — ${l.message}`));
+  }
+  return lines.join('\n');
+}
+
+async function tgHandleUpdate(update) {
+  try {
+    if (update.callback_query) {
+      const cq = update.callback_query;
+      const chatId = cq.message.chat.id;
+      const data = cq.data || '';
+      if (data.startsWith('tgregion:')) {
+        const region = data.slice('tgregion:'.length);
+        const idx = tgSubscriptions.findIndex((s) => s.chatId === chatId);
+        const entry = { chatId, regions: [region], joinedAt: idx >= 0 ? tgSubscriptions[idx].joinedAt : Date.now() };
+        if (idx >= 0) tgSubscriptions[idx] = entry; else tgSubscriptions.push(entry);
+        saveTgSubs();
+        const label = region === 'all' ? 'вся область' : (REGION_NAMES[region] || region);
+        await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: `Район выбран: ${label}` });
+        await tgCall('editMessageText', {
+          chat_id: chatId, message_id: cq.message.message_id,
+          text: `✅ Подписка настроена — район: *${label}*\n\nТы будешь получать сообщение здесь при каждой ракетной опасности, обнаружении БПЛА и отбое тревоги. Изменить район — /region. Отписаться — /stop.`,
+          parse_mode: 'Markdown'
+        });
+        addLog('info', `Telegram: подписка настроена, район ${region}`);
+        return;
+      }
+      // ===== Админ-панель бота: публикация тревоги/отбоя прямо из Telegram =====
+      if (data.startsWith('tga:')) {
+        if (!isTgAdmin(chatId)) {
+          await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Доступ только для админов. Наберите /admin <пароль>.', show_alert: true });
+          return;
+        }
+        const parts = data.split(':'); // tga:type:rocket  |  tga:go:rocket:belgorod  |  tga:back
+        if (parts[1] === 'type') {
+          const type = parts[2];
+          const label = type === 'rocket' ? '🚀 Ракетная опасность' : type === 'drone' ? '🛸 БПЛА' : '✅ Отбой';
+          await tgCall('answerCallbackQuery', { callback_query_id: cq.id });
+          await tgCall('editMessageText', {
+            chat_id: chatId, message_id: cq.message.message_id,
+            text: `${label}\n\nВыбери район:`,
+            reply_markup: alertRegionKeyboard(type)
+          });
+        } else if (parts[1] === 'go') {
+          const type = parts[2], region = parts[3];
+          try {
+            const item = type === 'cancel' ? await publishCancel(region, null) : await publishQuickAlert(type, region, null);
+            const regionLabel = region === 'all' ? 'по всей области' : (REGION_NAMES[region] || region);
+            await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Отправлено' });
+            await tgCall('editMessageText', {
+              chat_id: chatId, message_id: cq.message.message_id,
+              text: `✅ Отправлено в ленту и всем подписчикам:\n\n${item.i} *${item.tag}* — ${regionLabel}\n${item.txt}`,
+              parse_mode: 'Markdown'
+            });
+            addLog('info', `Telegram-админ ${chatId} опубликовал: ${item.tag} (${region})`);
+          } catch (err) {
+            await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Ошибка: ' + err.message, show_alert: true });
+          }
+        } else if (parts[1] === 'back') {
+          await tgCall('answerCallbackQuery', { callback_query_id: cq.id });
+          await tgCall('editMessageText', {
+            chat_id: chatId, message_id: cq.message.message_id,
+            text: '⚡ Что отправить?', reply_markup: alertTypeKeyboard()
+          });
+        }
+        return;
+      }
+      return;
+    }
+    const msg = update.message;
+    if (!msg || !msg.text) return;
+    const chatId = msg.chat.id;
+    const text = msg.text.trim();
+    if (text === '/start' || text.startsWith('/start ')) {
+      const idx = tgSubscriptions.findIndex((s) => s.chatId === chatId);
+      if (idx < 0) { tgSubscriptions.push({ chatId, regions: ['all'], joinedAt: Date.now() }); saveTgSubs(); addLog('info', 'Telegram: новый подписчик ' + chatId); }
+      await tgCall('sendMessage', {
+        chat_id: chatId,
+        text: '🚨 *Тревога Белгород* — оповещения о ракетной опасности и БПЛА.\n\nПо умолчанию включена вся область. Выбери свой район, если нужны только его оповещения:',
+        parse_mode: 'Markdown',
+        reply_markup: regionKeyboard('tgregion')
+      });
+    } else if (text === '/region') {
+      await tgCall('sendMessage', { chat_id: chatId, text: 'Выбери район:', reply_markup: regionKeyboard('tgregion') });
+    } else if (text === '/stop') {
+      tgSubscriptions = tgSubscriptions.filter((s) => s.chatId !== chatId);
+      saveTgSubs();
+      await tgCall('sendMessage', { chat_id: chatId, text: '🔕 Подписка отключена. Вернуться можно командой /start.' });
+      addLog('info', 'Telegram: отписка ' + chatId);
+    } else if (text.startsWith('/admin')) {
+      const password = text.slice('/admin'.length).trim();
+      if (!password) {
+        await tgCall('sendMessage', { chat_id: chatId, text: 'Использование: /admin ваш_пароль_админки' });
+        return;
+      }
+      // Сразу удаляем сообщение с паролем из чата — не оставляем его
+      // открытым текстом в истории переписки дольше, чем необходимо.
+      await tgCall('deleteMessage', { chat_id: chatId, message_id: msg.message_id });
+      if (password !== ADMIN_PASSWORD) {
+        addLog('warn', 'Telegram: неудачная попытка /admin из чата ' + chatId);
+        await tgCall('sendMessage', { chat_id: chatId, text: '❌ Неверный пароль.' });
+        return;
+      }
+      if (!isTgAdmin(chatId)) { tgAdmins.push(chatId); saveTgAdmins(); }
+      addLog('info', 'Telegram: вход в админку из чата ' + chatId);
+      await tgCall('sendMessage', {
+        chat_id: chatId,
+        text: '✅ Доступ администратора подтверждён.\n\n/stats — статистика сайта\n/alert — быстро отправить тревогу или отбой\n/adminlogout — выйти из режима админа'
+      });
+    } else if (text === '/stats') {
+      if (!isTgAdmin(chatId)) { await tgCall('sendMessage', { chat_id: chatId, text: 'Доступ только для админов. Наберите /admin <пароль>.' }); return; }
+      await tgCall('sendMessage', { chat_id: chatId, text: buildAdminStatsText(), parse_mode: 'Markdown' });
+    } else if (text === '/alert') {
+      if (!isTgAdmin(chatId)) { await tgCall('sendMessage', { chat_id: chatId, text: 'Доступ только для админов. Наберите /admin <пароль>.' }); return; }
+      await tgCall('sendMessage', { chat_id: chatId, text: '⚡ Что отправить?', reply_markup: alertTypeKeyboard() });
+    } else if (text === '/adminlogout') {
+      tgAdmins = tgAdmins.filter((id) => id !== chatId);
+      saveTgAdmins();
+      await tgCall('sendMessage', { chat_id: chatId, text: '👋 Вышли из режима администратора.' });
+    } else {
+      const base = 'Команды: /start — подписаться, /region — выбрать район, /stop — отписаться.';
+      const adminHint = isTgAdmin(chatId) ? '\n\nАдмин: /stats — статистика, /alert — отправить тревогу/отбой, /adminlogout — выйти.' : '\n\nВы администратор сайта? Наберите /admin <пароль> для доступа к статистике и быстрой отправке тревоги.';
+      await tgCall('sendMessage', { chat_id: chatId, text: base + adminHint });
+    }
+  } catch (err) {
+    addLog('error', 'Ошибка обработки Telegram-апдейта: ' + err.message, { stack: err.stack });
+  }
+}
+
+// Long polling — не требует публичного HTTPS-вебхука и лишней настройки,
+// работает "из коробки" сразу после того как задан TELEGRAM_BOT_TOKEN.
+let tgOffset = 0;
+async function tgPollLoop() {
+  if (!TG_API) return;
+  try {
+    const data = await tgCall('getUpdates', { offset: tgOffset, timeout: 25 });
+    if (data && data.ok && Array.isArray(data.result)) {
+      for (const update of data.result) {
+        tgOffset = update.update_id + 1;
+        await tgHandleUpdate(update);
+      }
+    }
+  } catch (err) {
+    addLog('error', 'Ошибка Telegram long polling: ' + err.message);
+    await new Promise((r) => setTimeout(r, 3000)); // не долбить API при постоянной ошибке
+  }
+  setImmediate(tgPollLoop);
+}
+if (TG_API) {
+  tgPollLoop();
+  addLog('info', 'Telegram-бот запущен (long polling)');
+} else {
+  console.log('[i] TELEGRAM_BOT_TOKEN не задан — Telegram-канал оповещений отключён (сайт и push работают как обычно).');
+}
+
+async function notifyTelegramSubscribers(item) {
+  if (!TG_API || !tgSubscriptions.length) return;
+  const isUrgent = isAlarmTriggering(item);
+  const regionLabel = item.region === 'all' ? 'по всей области' : (REGION_NAMES[item.region] || item.region);
+  const title = isUrgent ? `🚨 *ТРЕВОГА* · ${regionLabel}` : `${item.i} *${item.tag}*`;
+  const text = `${title}\n\n${item.txt}\n\n_${item.time} · ${item.date}_`;
+  const stillValid = [];
+  for (const entry of tgSubscriptions) {
+    const matches = item.region === 'all' || (entry.regions && (entry.regions.includes('all') || entry.regions.includes(item.region)));
+    if (!matches) { stillValid.push(entry); continue; }
+    const result = await tgCall('sendMessage', { chat_id: entry.chatId, text, parse_mode: 'Markdown' });
+    // Код 403 = пользователь заблокировал бота — удаляем такого подписчика,
+    // как это уже делается для "умерших" web push подписок (404/410).
+    if (result === null) { /* сетевая/временная ошибка — не удаляем, оставляем как есть */ stillValid.push(entry); }
+    else if (result.ok === false && result.error_code === 403) { addLog('info', `Telegram: подписчик ${entry.chatId} заблокировал бота, удалён из списка`); }
+    else stillValid.push(entry);
+  }
+  tgSubscriptions = stillValid;
+  saveTgSubs();
+}
 
 // Ловим то, что иначе молча уронило бы процесс без единой строки в логах.
 process.on('uncaughtException', (err) => {
@@ -925,10 +1061,14 @@ const QUICK_ALERT_META = {
   rocket: { i: '🚀', tag: 'Ракетная опасность', verb: 'Объявлена ракетная опасность' },
   drone: { i: '🛸', tag: 'БПЛА обнаружен', verb: 'Обнаружен БПЛА' }
 };
-app.post('/api/admin/quick-alert', requireAdmin, async (req, res) => {
-  const { type, region, text } = req.body || {};
+
+// Общая логика публикации тревоги/отбоя — используется и HTTP-эндпоинтами
+// админки, и админ-командами Telegram-бота, чтобы не дублировать код и не
+// разойтись в поведении (оба пути должны одинаково сохранять в ленту и
+// одинаково рассылать всем подписчикам).
+async function publishQuickAlert(type, region, text) {
   const meta = QUICK_ALERT_META[type];
-  if (!meta) return res.status(400).json({ error: 'type must be rocket or drone' });
+  if (!meta) throw new Error('type must be rocket or drone');
   const dt = new Date();
   const regionLabel = (!region || region === 'all') ? 'по всей области' : (REGION_NAMES[region] || region);
   const item = {
@@ -949,12 +1089,10 @@ app.post('/api/admin/quick-alert', requireAdmin, async (req, res) => {
   saveJson(STATE_FILE, state);
   addLog('info', `Быстрая тревога отправлена: ${meta.tag} (${item.region})`);
   await notifySubscribers(item);
-  res.json({ ok: true, item });
-});
+  return item;
+}
 
-// Быстрый отбой — по конкретному району или сразу по всей области
-app.post('/api/admin/cancel', requireAdmin, async (req, res) => {
-  const { region, text } = req.body || {};
+async function publishCancel(region, text) {
   const dt = new Date();
   const item = {
     id: 'manual-cancel-' + dt.getTime(),
@@ -974,6 +1112,23 @@ app.post('/api/admin/cancel', requireAdmin, async (req, res) => {
   saveJson(STATE_FILE, state);
   addLog('info', `Отбой отправлен (${region || 'all'})`);
   await notifySubscribers(item);
+  return item;
+}
+
+app.post('/api/admin/quick-alert', requireAdmin, async (req, res) => {
+  const { type, region, text } = req.body || {};
+  try {
+    const item = await publishQuickAlert(type, region, text);
+    res.json({ ok: true, item });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Быстрый отбой — по конкретному району или сразу по всей области
+app.post('/api/admin/cancel', requireAdmin, async (req, res) => {
+  const { region, text } = req.body || {};
+  const item = await publishCancel(region, text);
   res.json({ ok: true, item });
 });
 
