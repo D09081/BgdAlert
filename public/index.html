@@ -674,8 +674,15 @@
     <button class="btn ghost" id="testSignalBtn" type="button" style="margin-bottom:10px;">🔊 Проверить сигнал тревоги</button>
     <button class="btn" id="savePushBtn" type="button">Включить уведомления</button>
     <button class="btn ghost" id="laterBtn" type="button">Позже</button>
+
+    <div id="tgSubscribeBlock" style="display:none; margin-top:18px; padding-top:16px; border-top:1px solid var(--border); text-align:left;">
+      <div style="font-size:12px; color:var(--text-secondary); font-weight:600; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">📡 Резервный канал</div>
+      <p style="font-size:13px; color:var(--text-secondary); margin-bottom:10px;">При ограничениях мобильного интернета браузерные push могут не доходить. Telegram обычно остаётся на связи стабильнее — рекомендуем подписаться дополнительно.</p>
+      <a class="btn ghost" id="tgSubscribeLink" href="#" target="_blank" rel="noopener" style="display:block; text-align:center; text-decoration:none; box-sizing:border-box;">✈️ Подписаться в Telegram</a>
+    </div>
   </div>
 </div>
+
 
 <div class="toasts" id="toasts"></div>
 
@@ -1323,6 +1330,21 @@ function initHandlers() {
   var hideBtn = document.getElementById('hideInstallHintBtn');
   if (hideBtn) hideBtn.addEventListener('click', hideInstallHint);
 }
+// Подтягиваем имя Telegram-бота (если задан на сервере) и показываем
+// кнопку подписки как резервный канал — если бот не настроен, блок остаётся
+// скрытым и ничего не ломает.
+async function loadTelegramConfig() {
+  try {
+    var res = await fetch(API_BASE + '/api/telegram-config');
+    var data = await res.json();
+    if (data && data.botUsername) {
+      document.getElementById('tgSubscribeLink').href = 'https://t.me/' + data.botUsername + '?start=1';
+      document.getElementById('tgSubscribeBlock').style.display = 'block';
+    }
+  } catch (err) { console.log('Telegram config error:', err); }
+}
+loadTelegramConfig();
+
 initHandlers();
 loadPrefsFromStorage();
 

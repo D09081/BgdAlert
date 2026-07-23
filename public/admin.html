@@ -158,6 +158,7 @@
       <div class="stat-card"><div class="num" id="statUnique">—</div><div class="label">Уникальных посетителей</div></div>
       <div class="stat-card"><div class="num" id="statToday">—</div><div class="label">Визитов сегодня</div></div>
       <div class="stat-card"><div class="num" id="statSubs">—</div><div class="label">Активных подписчиков push</div></div>
+      <div class="stat-card"><div class="num" id="statTgSubs">—</div><div class="label">Подписчиков Telegram-бота</div></div>
     </div>
 
     <div class="grid-2">
@@ -494,6 +495,7 @@ async function loadStats() {
     document.getElementById('statUnique').textContent = data.visits.uniqueVisitors;
     document.getElementById('statToday').textContent = data.visits.today;
     document.getElementById('statSubs').textContent = data.subscribers.total;
+    document.getElementById('statTgSubs').textContent = data.subscribers.telegram || 0;
 
     var connDot = document.getElementById('connDot');
     connDot.classList.toggle('off', !data.parser.ok);
