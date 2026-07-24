@@ -216,15 +216,26 @@ const TG_ADMINS_FILE = path.join(DATA_DIR, 'telegram-admins.json');
 let tgAdmins = loadJson(TG_ADMINS_FILE, []); // [chatId, ...] — чаты, прошедшие /admin <пароль>
 function saveTgAdmins() { saveJson(TG_ADMINS_FILE, tgAdmins); }
 function isTgAdmin(chatId) { return tgAdmins.includes(chatId); }
+// Не персистим — это временное состояние на время сессии, а не данные:
+let tgPendingAction = {}; // chatId -> 'add_channel' (ждём текстовый ответ после нажатия кнопки)
+let tgFeedCache = {};     // chatId -> [id, id, ...] — индекс кнопки → реальный id записи ленты
+                          // (id записей могут быть длиннее лимита callback_data в 64 байта,
+                          // поэтому в кнопках передаём короткий индекс, а не сам id)
 
 function saveTgSubs() { saveJson(TG_SUBS_FILE, tgSubscriptions); }
 
-async function tgCall(method, params) {
+async function tgCall(method, params, timeoutMs) {
   if (!TG_API) return null;
   try {
-    const res = await axios.post(`${TG_API}/${method}`, params, { timeout: 10000 });
+    const res = await axios.post(`${TG_API}/${method}`, params, { timeout: timeoutMs || 10000 });
     return res.data;
   } catch (err) {
+    // getUpdates — единственный метод с реальным долгим ожиданием (long polling,
+    // params.timeout=25 сек на стороне Telegram) — если он честно "молчит", не
+    // получив новых апдейтов, это НЕ ошибка, а нормальная работа long polling.
+    if (method === 'getUpdates' && (err.code === 'ECONNABORTED' || /timeout/i.test(err.message))) {
+      return { ok: true, result: [] };
+    }
     addLog('error', `Telegram API ошибка (${method}): ` + (err.response?.data?.description || err.message));
     return null;
   }
@@ -299,6 +310,98 @@ function buildAdminStatsText() {
   return lines.join('\n');
 }
 
+function mainMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '⚡ Быстрая тревога', callback_data: 'tga:menu:alert' }],
+      [{ text: '📊 Статистика', callback_data: 'tga:menu:stats' }, { text: '🧾 Логи', callback_data: 'tga:menu:logs' }],
+      [{ text: '📡 Каналы-источники', callback_data: 'tga:menu:channels' }],
+      [{ text: '⚙️ Настройки тревоги', callback_data: 'tga:menu:alarmcfg' }],
+      [{ text: '🗂 Текущая лента', callback_data: 'tga:menu:feed' }],
+      [{ text: '🚪 Выйти из админки', callback_data: 'tga:menu:logout' }]
+    ]
+  };
+}
+
+function logsKeyboard(filter) {
+  const mark = (f) => (filter === f ? '• ' : '');
+  return {
+    inline_keyboard: [
+      [{ text: mark('') + 'Все', callback_data: 'tga:logs:' }, { text: mark('error') + 'Ошибки', callback_data: 'tga:logs:error' }],
+      [{ text: mark('warn') + 'Предупреждения', callback_data: 'tga:logs:warn' }, { text: mark('info') + 'Инфо', callback_data: 'tga:logs:info' }],
+      [{ text: '↻ Обновить', callback_data: 'tga:logs:' + filter }],
+      [{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]
+    ]
+  };
+}
+
+function buildLogsText(filter) {
+  const LOG_LABEL = { error: '🔴 Ошибка', warn: '🟡 Предупреждение', info: 'ℹ️ Инфо' };
+  const items = (filter ? logs.filter((l) => l.level === filter) : logs).slice(-12).reverse();
+  if (!items.length) return '🧾 *Логи*\n\nПока нет записей.';
+  const lines = ['🧾 *Логи* ' + (filter ? `(фильтр: ${filter})` : '(все)')];
+  items.forEach((l) => {
+    const time = new Date(l.t).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
+    lines.push(`\n${LOG_LABEL[l.level] || l.level} · ${time}\n${l.message}`);
+  });
+  return lines.join('\n');
+}
+
+function channelsKeyboard() {
+  const rows = channels.map((c) => {
+    const health = channelHealth[c];
+    const icon = health && health.lastError ? '⚠️' : '✅';
+    return [{ text: `${icon} @${c}`, callback_data: 'tga:noop' }, { text: '🗑 удалить', callback_data: 'tga:chan:del:' + c }];
+  });
+  rows.push([{ text: '➕ Добавить канал', callback_data: 'tga:chan:add' }]);
+  rows.push([{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]);
+  return { inline_keyboard: rows };
+}
+
+function buildChannelsText() {
+  const lines = ['📡 *Каналы-источники*', ''];
+  channels.forEach((c) => {
+    const health = channelHealth[c];
+    const status = health && health.lastError ? `⚠️ ошибка: ${health.lastError}` : '✅ ок';
+    lines.push(`@${c} — ${status}`);
+  });
+  return lines.join('\n');
+}
+
+function alarmCfgKeyboard() {
+  const on = (v) => (v ? '✅' : '⬜️');
+  return {
+    inline_keyboard: [
+      [{ text: `${on(alarmConfig.enabled)} Тревога включена`, callback_data: 'tga:cfg:enabled' }],
+      [{ text: `${on(alarmConfig.types.includes('rocket'))} 🚀 Ракетная опасность`, callback_data: 'tga:cfg:type:rocket' }],
+      [{ text: `${on(alarmConfig.types.includes('drone'))} 🛸 БПЛА`, callback_data: 'tga:cfg:type:drone' }],
+      [{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]
+    ]
+  };
+}
+
+function feedKeyboard(chatId) {
+  const items = (state.feed || []).slice(0, 8);
+  tgFeedCache[chatId] = items.map((it) => it.id);
+  const rows = items.map((it, i) => [
+    { text: `${it.i} ${it.time} ${it.tag}`.slice(0, 60), callback_data: 'tga:noop' },
+    { text: '🗑', callback_data: 'tga:feed:del:' + i }
+  ]);
+  rows.push([{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]);
+  return { inline_keyboard: rows };
+}
+
+function buildFeedText() {
+  const items = (state.feed || []).slice(0, 8);
+  if (!items.length) return '🗂 *Текущая лента*\n\nПусто.';
+  const lines = ['🗂 *Текущая лента* (последние 8)'];
+  items.forEach((it) => {
+    const regionLabel = it.region === 'all' ? 'вся область' : (REGION_NAMES[it.region] || it.region);
+    lines.push(`\n${it.i} *${it.tag}* — ${regionLabel}${it.manual ? ' ✍️' : ''}\n${it.time} · ${it.date}\n${(it.txt || '').slice(0, 150)}`);
+  });
+  return lines.join('\n');
+}
+
 async function tgHandleUpdate(update) {
   try {
     if (update.callback_query) {
@@ -327,37 +430,107 @@ async function tgHandleUpdate(update) {
           await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Доступ только для админов. Наберите /admin <пароль>.', show_alert: true });
           return;
         }
-        const parts = data.split(':'); // tga:type:rocket  |  tga:go:rocket:belgorod  |  tga:back
+        const parts = data.split(':'); // tga:menu:stats  |  tga:type:rocket  |  tga:go:rocket:belgorod  |  ...
+        const mid = cq.message.message_id;
+        const edit = (text, reply_markup) => tgCall('editMessageText', { chat_id: chatId, message_id: mid, text, parse_mode: 'Markdown', reply_markup });
+
+        if (data === 'tga:noop') {
+          await tgCall('answerCallbackQuery', { callback_query_id: cq.id });
+          return;
+        }
+
+        if (parts[1] === 'menu') {
+          const section = parts[2];
+          await tgCall('answerCallbackQuery', { callback_query_id: cq.id });
+          if (section === 'main') {
+            await edit('🛠 *Админ-меню*\n\nВыбери раздел:', mainMenuKeyboard());
+          } else if (section === 'alert') {
+            await edit('⚡ Что отправить?', alertTypeKeyboard());
+          } else if (section === 'stats') {
+            await edit(buildAdminStatsText(), { inline_keyboard: [[{ text: '↻ Обновить', callback_data: 'tga:menu:stats' }], [{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]] });
+          } else if (section === 'logs') {
+            await edit(buildLogsText(''), logsKeyboard(''));
+          } else if (section === 'channels') {
+            await edit(buildChannelsText(), channelsKeyboard());
+          } else if (section === 'alarmcfg') {
+            await edit('⚙️ *Настройки тревоги*\n\nЧто из этого триггерит громкий звук/вибрацию у пользователей на сайте:', alarmCfgKeyboard());
+          } else if (section === 'feed') {
+            await edit(buildFeedText(), feedKeyboard(chatId));
+          } else if (section === 'logout') {
+            tgAdmins = tgAdmins.filter((id) => id !== chatId);
+            saveTgAdmins();
+            await tgCall('editMessageText', { chat_id: chatId, message_id: mid, text: '👋 Вы вышли из режима администратора. /admin <пароль> — войти снова.' });
+          }
+          return;
+        }
+
         if (parts[1] === 'type') {
           const type = parts[2];
           const label = type === 'rocket' ? '🚀 Ракетная опасность' : type === 'drone' ? '🛸 БПЛА' : '✅ Отбой';
           await tgCall('answerCallbackQuery', { callback_query_id: cq.id });
-          await tgCall('editMessageText', {
-            chat_id: chatId, message_id: cq.message.message_id,
-            text: `${label}\n\nВыбери район:`,
-            reply_markup: alertRegionKeyboard(type)
-          });
+          await edit(`${label}\n\nВыбери район:`, alertRegionKeyboard(type));
         } else if (parts[1] === 'go') {
           const type = parts[2], region = parts[3];
           try {
             const item = type === 'cancel' ? await publishCancel(region, null) : await publishQuickAlert(type, region, null);
             const regionLabel = region === 'all' ? 'по всей области' : (REGION_NAMES[region] || region);
             await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Отправлено' });
-            await tgCall('editMessageText', {
-              chat_id: chatId, message_id: cq.message.message_id,
-              text: `✅ Отправлено в ленту и всем подписчикам:\n\n${item.i} *${item.tag}* — ${regionLabel}\n${item.txt}`,
-              parse_mode: 'Markdown'
-            });
+            await edit(`✅ Отправлено в ленту и всем подписчикам:\n\n${item.i} *${item.tag}* — ${regionLabel}\n${item.txt}`, { inline_keyboard: [[{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]] });
             addLog('info', `Telegram-админ ${chatId} опубликовал: ${item.tag} (${region})`);
           } catch (err) {
             await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Ошибка: ' + err.message, show_alert: true });
           }
         } else if (parts[1] === 'back') {
           await tgCall('answerCallbackQuery', { callback_query_id: cq.id });
-          await tgCall('editMessageText', {
-            chat_id: chatId, message_id: cq.message.message_id,
-            text: '⚡ Что отправить?', reply_markup: alertTypeKeyboard()
-          });
+          await edit('⚡ Что отправить?', alertTypeKeyboard());
+        } else if (parts[1] === 'logs') {
+          const filter = parts[2] || '';
+          await tgCall('answerCallbackQuery', { callback_query_id: cq.id });
+          await edit(buildLogsText(filter), logsKeyboard(filter));
+        } else if (parts[1] === 'cfg') {
+          if (parts[2] === 'enabled') {
+            alarmConfig.enabled = !alarmConfig.enabled;
+          } else if (parts[2] === 'type') {
+            const t = parts[3];
+            alarmConfig.types = alarmConfig.types.includes(t) ? alarmConfig.types.filter((x) => x !== t) : alarmConfig.types.concat([t]);
+          }
+          saveJson(ALARM_CONFIG_FILE, alarmConfig);
+          addLog('info', `Telegram-админ ${chatId} изменил настройки тревоги`, alarmConfig);
+          await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Сохранено' });
+          await edit('⚙️ *Настройки тревоги*\n\nЧто из этого триггерит громкий звук/вибрацию у пользователей на сайте:', alarmCfgKeyboard());
+        } else if (parts[1] === 'chan') {
+          if (parts[2] === 'add') {
+            tgPendingAction[chatId] = 'add_channel';
+            await tgCall('answerCallbackQuery', { callback_query_id: cq.id });
+            await edit('✏️ Пришли следующим сообщением username канала (например `mchs31` или ссылку `t.me/mchs31`).', { inline_keyboard: [[{ text: '⬅️ Отмена', callback_data: 'tga:menu:channels' }]] });
+          } else if (parts[2] === 'del') {
+            const parsed = parts.slice(3).join(':'); // на случай ':' в имени канала — маловероятно, но безопасно
+            if (channels.length <= 1) {
+              await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Нельзя удалить последний оставшийся канал', show_alert: true });
+              return;
+            }
+            channels = channels.filter((c) => c.toLowerCase() !== parsed.toLowerCase());
+            delete channelHealth[parsed];
+            saveJson(CHANNELS_FILE, channels);
+            addLog('info', `Telegram-админ ${chatId} удалил канал @${parsed}`);
+            await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Удалено' });
+            await edit(buildChannelsText(), channelsKeyboard());
+          }
+        } else if (parts[1] === 'feed' && parts[2] === 'del') {
+          const idx = Number(parts[3]);
+          const id = (tgFeedCache[chatId] || [])[idx];
+          if (id == null) {
+            await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Список устарел, открой раздел заново', show_alert: true });
+            return;
+          }
+          const before = state.feed.length;
+          state.feed = (state.feed || []).filter((it) => String(it.id) !== String(id));
+          if (state.feed.length !== before) {
+            saveJson(STATE_FILE, state);
+            addLog('info', `Telegram-админ ${chatId} удалил запись из ленты: ${id}`);
+          }
+          await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Удалено' });
+          await edit(buildFeedText(), feedKeyboard(chatId));
         }
         return;
       }
@@ -367,6 +540,28 @@ async function tgHandleUpdate(update) {
     if (!msg || !msg.text) return;
     const chatId = msg.chat.id;
     const text = msg.text.trim();
+
+    // Если только что нажали "➕ Добавить канал" — трактуем следующее
+    // обычное сообщение как username канала, а не как неизвестную команду.
+    if (tgPendingAction[chatId] === 'add_channel' && !text.startsWith('/')) {
+      delete tgPendingAction[chatId];
+      const parsed = parseChannelInput(text);
+      if (!parsed) {
+        await tgCall('sendMessage', { chat_id: chatId, text: '❌ Не удалось распознать канал. Пришли просто username, например mchs31.' });
+        return;
+      }
+      if (channels.includes(parsed)) {
+        await tgCall('sendMessage', { chat_id: chatId, text: `Канал @${parsed} уже добавлен.`, parse_mode: 'Markdown', reply_markup: channelsKeyboard() });
+        return;
+      }
+      channels.push(parsed);
+      saveJson(CHANNELS_FILE, channels);
+      addLog('info', `Telegram-админ ${chatId} добавил канал-источник: @${parsed}`);
+      pollOnce();
+      await tgCall('sendMessage', { chat_id: chatId, text: '✅ Канал добавлен.\n\n' + buildChannelsText(), parse_mode: 'Markdown', reply_markup: channelsKeyboard() });
+      return;
+    }
+
     if (text === '/start' || text.startsWith('/start ')) {
       const idx = tgSubscriptions.findIndex((s) => s.chatId === chatId);
       if (idx < 0) { tgSubscriptions.push({ chatId, regions: ['all'], joinedAt: Date.now() }); saveTgSubs(); addLog('info', 'Telegram: новый подписчик ' + chatId); }
@@ -401,21 +596,20 @@ async function tgHandleUpdate(update) {
       addLog('info', 'Telegram: вход в админку из чата ' + chatId);
       await tgCall('sendMessage', {
         chat_id: chatId,
-        text: '✅ Доступ администратора подтверждён.\n\n/stats — статистика сайта\n/alert — быстро отправить тревогу или отбой\n/adminlogout — выйти из режима админа'
+        text: '✅ Доступ администратора подтверждён.\n\n🛠 *Админ-меню*\n\nВыбери раздел:',
+        parse_mode: 'Markdown',
+        reply_markup: mainMenuKeyboard()
       });
-    } else if (text === '/stats') {
+    } else if (text === '/menu' || text === '/stats' || text === '/alert') {
       if (!isTgAdmin(chatId)) { await tgCall('sendMessage', { chat_id: chatId, text: 'Доступ только для админов. Наберите /admin <пароль>.' }); return; }
-      await tgCall('sendMessage', { chat_id: chatId, text: buildAdminStatsText(), parse_mode: 'Markdown' });
-    } else if (text === '/alert') {
-      if (!isTgAdmin(chatId)) { await tgCall('sendMessage', { chat_id: chatId, text: 'Доступ только для админов. Наберите /admin <пароль>.' }); return; }
-      await tgCall('sendMessage', { chat_id: chatId, text: '⚡ Что отправить?', reply_markup: alertTypeKeyboard() });
+      await tgCall('sendMessage', { chat_id: chatId, text: '🛠 *Админ-меню*\n\nВыбери раздел:', parse_mode: 'Markdown', reply_markup: mainMenuKeyboard() });
     } else if (text === '/adminlogout') {
       tgAdmins = tgAdmins.filter((id) => id !== chatId);
       saveTgAdmins();
       await tgCall('sendMessage', { chat_id: chatId, text: '👋 Вышли из режима администратора.' });
     } else {
       const base = 'Команды: /start — подписаться, /region — выбрать район, /stop — отписаться.';
-      const adminHint = isTgAdmin(chatId) ? '\n\nАдмин: /stats — статистика, /alert — отправить тревогу/отбой, /adminlogout — выйти.' : '\n\nВы администратор сайта? Наберите /admin <пароль> для доступа к статистике и быстрой отправке тревоги.';
+      const adminHint = isTgAdmin(chatId) ? '\n\nАдмин: /menu — открыть меню управления.' : '\n\nВы администратор сайта? Наберите /admin <пароль> для доступа к панели управления.';
       await tgCall('sendMessage', { chat_id: chatId, text: base + adminHint });
     }
   } catch (err) {
@@ -429,7 +623,7 @@ let tgOffset = 0;
 async function tgPollLoop() {
   if (!TG_API) return;
   try {
-    const data = await tgCall('getUpdates', { offset: tgOffset, timeout: 25 });
+    const data = await tgCall('getUpdates', { offset: tgOffset, timeout: 25 }, 30000);
     if (data && data.ok && Array.isArray(data.result)) {
       for (const update of data.result) {
         tgOffset = update.update_id + 1;
@@ -503,11 +697,36 @@ const REGION_NAMES = {
   korocha: 'Короча', 'krasnaya-yaruga': 'Красная Яруга'
 };
 
-// Признаки рекламных / нерелевантных постов — такие сообщения отбрасываем
+// Признаки рекламных / нерелевантных постов — такие сообщения отбрасываем ЦЕЛИКОМ
+// (это про текстовые маркеры самой рекламы, а не про наличие ссылки — ссылку внутри
+// иначе легитимного оповещения вырезаем построчно через stripLinks(), не выкидывая
+// оповещение целиком, см. ниже).
 const AD_PATTERNS = [
   /реклам/i, /promo/i, /подпис\w+ на канал/i, /erid/i, /18\+.*реклама/i,
-  /по вопросам сотрудничества/i, /vk\.cc\/|clck\.ru\//i
+  /по вопросам сотрудничества/i
 ];
+
+// Ссылки внутри иначе нормального сообщения (например «РАКЕТНАЯ ОПАСНОСТЬ» текстом,
+// а строкой ниже — рекламная/произвольная ссылка) — вырезаем построчно, само
+// оповещение остаётся. Если после вырезания ссылки строка становится пустой или
+// состоит только из CTA-обрывка вида «подробнее:», «читать далее» — убираем и её.
+const URL_RE = /(https?:\/\/\S+)|(\bwww\.\S+)|(\bt\.me\/\S+)|(\bvk\.cc\/\S+)|(\bclck\.ru\/\S+)|(\bbit\.ly\/\S+)|(\bgoo\.gl\/\S+)/gi;
+const LINK_STUB_RE = /^[\s👉➡️\-–—:]*(подробнее(\s*по\s*ссылке)?|читать\s*далее|источник|по\s*ссылке|переходи(те)?|жми(те)?)[\s👉➡️\-–—:]*$/i;
+// То же самое, но "приклеенное" к концу строки с обычным текстом — например
+// «БПЛА обнаружен в Короче. Источник: <ссылка>» — обрезаем только хвост,
+// оставляя содержательную часть строки.
+const TRAILING_CTA_RE = /[\s👉➡️\-–—:]*(подробнее(\s*по\s*ссылке)?|читать\s*далее|источник|по\s*ссылке|переходи(те)?|жми(те)?)[\s👉➡️\-–—:]*$/i;
+
+function stripLinks(text) {
+  return text
+    .split('\n')
+    .map((line) => line.replace(URL_RE, '').trim())
+    .map((line) => line.replace(TRAILING_CTA_RE, '').trim())
+    .filter((line) => line.length > 0 && !LINK_STUB_RE.test(line) && /[a-zA-Zа-яА-ЯёЁ]/.test(line))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
 
 function detectRegion(text) {
   const lower = text.toLowerCase();
@@ -658,8 +877,9 @@ async function fetchChannelMessages(channel) {
 }
 
 function formatFeedItem(msg) {
-  const cls = classify(msg.text);
-  const region = channelRegionOverride[msg.channel] || detectRegion(msg.text);
+  const cleanText = stripLinks(msg.text);
+  const cls = classify(cleanText);
+  const region = channelRegionOverride[msg.channel] || detectRegion(cleanText);
   const hasRealTime = !!msg.datetime;
   const dt = hasRealTime ? new Date(msg.datetime) : new Date();
   const time = dt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
@@ -667,7 +887,7 @@ function formatFeedItem(msg) {
   return {
     id: msg.id,
     t: cls.t, i: cls.i, tag: cls.tag,
-    txt: msg.text.length > 400 ? msg.text.slice(0, 400) + '…' : msg.text,
+    txt: cleanText.length > 400 ? cleanText.slice(0, 400) + '…' : cleanText,
     time, date, region,
     isNew: false,
     ts: dt.getTime(),
