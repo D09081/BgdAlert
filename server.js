@@ -424,6 +424,16 @@ function alertRegionKeyboard(type) {
 
 // Тот же набор данных, что видит админ на сайте (вкладка «Статистика») —
 // собран в текстовом виде для Telegram, чтобы не заходить на сайт с телефона.
+// Экранирование спецсимволов Telegram-Markdown (legacy parse_mode: 'Markdown').
+// Без этого любой текст из внешнего источника — имя канала с "_", текст поста
+// из канала со звёздочкой/подчёркиванием, сообщение об ошибке со скобкой —
+// ломает парсинг ("Can't find end of the entity...") и Telegram просто не
+// показывает/не редактирует сообщение. Экранируем везде, где в Markdown-текст
+// подставляется что-то не полностью нами контролируемое.
+function escMd(s) {
+  return String(s == null ? '' : s).replace(/([_*`\[])/g, '\\$1');
+}
+
 function buildAdminStatsText() {
   const feedByType = {};
   (Array.isArray(state.feed) ? state.feed : []).forEach((it) => { feedByType[it.t] = (feedByType[it.t] || 0) + 1; });
@@ -447,13 +457,13 @@ function buildAdminStatsText() {
   lines.push('');
   lines.push(`📡 Парсер каналов: ${lastPollOk ? '✅ работает' : '⚠️ ошибка'}`);
   lines.push(`   Последний опрос: ${lastPollAt ? new Date(lastPollAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—'}`);
-  lines.push(`   Каналы: ${channels.join(', ')}`);
+  lines.push(`   Каналы: ${channels.map(escMd).join(', ')}`);
   lines.push('');
   lines.push(`⚙️ Тревога включена: ${alarmConfig.enabled ? 'да' : 'нет'}, типы: ${alarmConfig.types.join(', ')}`);
   if (recentErrors.length) {
     lines.push('');
     lines.push('🔴 Последние ошибки в логах:');
-    recentErrors.forEach((l) => lines.push(`  • ${new Date(l.t).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' })} — ${l.message}`));
+    recentErrors.forEach((l) => lines.push(`  • ${new Date(l.t).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' })} — ${escMd(l.message)}`));
   }
   return lines.join('\n');
 }
@@ -490,7 +500,7 @@ function buildLogsText(filter) {
   const lines = ['🧾 *Логи* ' + (filter ? `(фильтр: ${filter})` : '(все)')];
   items.forEach((l) => {
     const time = new Date(l.t).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
-    lines.push(`\n${LOG_LABEL[l.level] || l.level} · ${time}\n${l.message}`);
+    lines.push(`\n${LOG_LABEL[l.level] || l.level} · ${time}\n${escMd(l.message)}`);
   });
   return lines.join('\n');
 }
@@ -510,8 +520,8 @@ function buildChannelsText() {
   const lines = ['📡 *Каналы-источники*', ''];
   channels.forEach((c) => {
     const health = channelHealth[c];
-    const status = health && health.lastError ? `⚠️ ошибка: ${health.lastError}` : '✅ ок';
-    lines.push(`@${c} — ${status}`);
+    const status = health && health.lastError ? `⚠️ ошибка: ${escMd(health.lastError)}` : '✅ ок';
+    lines.push(`@${escMd(c)} — ${status}`);
   });
   return lines.join('\n');
 }
@@ -545,7 +555,7 @@ function buildFeedText() {
   const lines = ['🗂 *Текущая лента* (последние 8)'];
   items.forEach((it) => {
     const regionLabel = it.region === 'all' ? 'вся область' : (REGION_NAMES[it.region] || it.region);
-    lines.push(`\n${it.i} *${it.tag}* — ${regionLabel}${it.manual ? ' ✍️' : ''}\n${it.time} · ${it.date}\n${(it.txt || '').slice(0, 150)}`);
+    lines.push(`\n${it.i} *${it.tag}* — ${regionLabel}${it.manual ? ' ✍️' : ''}\n${it.time} · ${it.date}\n${escMd((it.txt || '').slice(0, 150))}`);
   });
   return lines.join('\n');
 }
@@ -629,7 +639,7 @@ async function tgHandleUpdate(update) {
             const item = type === 'cancel' ? await publishCancel(region, null) : await publishQuickAlert(type, region, null);
             const regionLabel = region === 'all' ? 'по всей области' : (REGION_NAMES[region] || region);
             await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Отправлено' });
-            await edit(`✅ Отправлено в ленту и всем подписчикам:\n\n${item.i} *${item.tag}* — ${regionLabel}\n${item.txt}`, { inline_keyboard: [[{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]] });
+            await edit(`✅ Отправлено в ленту и всем подписчикам:\n\n${item.i} *${item.tag}* — ${regionLabel}\n${escMd(item.txt)}`, { inline_keyboard: [[{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]] });
             addLog('info', `Telegram-админ ${chatId} опубликовал: ${item.tag} (${region})`);
           } catch (err) {
             await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Ошибка: ' + err.message, show_alert: true });
@@ -709,7 +719,7 @@ async function tgHandleUpdate(update) {
         return;
       }
       if (channels.includes(parsed)) {
-        await tgCall('sendMessage', { chat_id: chatId, text: `Канал @${parsed} уже добавлен.`, parse_mode: 'Markdown', reply_markup: channelsKeyboard() });
+        await tgCall('sendMessage', { chat_id: chatId, text: `Канал @${escMd(parsed)} уже добавлен.`, parse_mode: 'Markdown', reply_markup: channelsKeyboard() });
         return;
       }
       channels.push(parsed);
@@ -757,7 +767,7 @@ async function tgHandleUpdate(update) {
       // пользователя нет @username, по которому его можно найти в списке.
       await tgCall('sendMessage', {
         chat_id: chatId,
-        text: `Доступ администратора теперь выдаётся с сайта (вкладка «Админы Telegram»), а не паролем в боте.\n\nТвой chat ID: \`${chatId}\`${msg.from && msg.from.username ? ` (username: @${msg.from.username})` : ''} — передай его администратору сайта, чтобы получить доступ.`,
+        text: `Доступ администратора теперь выдаётся с сайта (вкладка «Админы Telegram»), а не паролем в боте.\n\nТвой chat ID: \`${chatId}\`${msg.from && msg.from.username ? ` (username: @${escMd(msg.from.username)})` : ''} — передай его администратору сайта, чтобы получить доступ.`,
         parse_mode: 'Markdown'
       });
     } else if (text === '/menu' || text === '/stats' || text === '/alert') {
@@ -821,7 +831,7 @@ async function notifyTelegramSubscribers(item) {
   const isUrgent = isAlarmTriggering(item);
   const regionLabel = item.region === 'all' ? 'по всей области' : (REGION_NAMES[item.region] || item.region);
   const title = isUrgent ? `🚨 *ТРЕВОГА* · ${regionLabel}` : `${item.i} *${item.tag}*`;
-  const text = `${title}\n\n${item.txt}\n\n_${item.time} · ${item.date}_`;
+  const text = `${title}\n\n${escMd(item.txt)}\n\n_${item.time} · ${item.date}_`;
   const stillValid = [];
   for (const entry of tgSubscriptions) {
     const matches = item.region === 'all' || (entry.regions && (entry.regions.includes('all') || entry.regions.includes(item.region)));
