@@ -19,9 +19,80 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+// ===== Внешний бэкап данных (Upstash Redis REST) — переживает перезапуск хостинга =====
+// НАЙДЕННАЯ ПРИЧИНА, почему каналы-источники и подписки слетали после
+// перезапуска сервера: на бесплатном тарифе Render (и большинстве бесплатных
+// PaaS) файловая система ЭФЕМЕРНАЯ — по официальной документации Render, все
+// изменения на диске стираются при КАЖДОМ редеплое, restart'е и "пересыпании"
+// контейнера после простоя, а не только при обновлении кода. Это ограничение
+// самого хостинга, а не баг в этом файле — просто писать данные на локальный
+// диск было недостаточно.
+//
+// Решение без платного тарифа: если заданы UPSTASH_REDIS_REST_URL и
+// UPSTASH_REDIS_REST_TOKEN (бесплатный Upstash Redis — https://upstash.com,
+// без карты, данные не привязаны к диску Render и не пропадают), все те же
+// файлы (каналы, подписки push и Telegram, настройки тревоги, лента, логи,
+// админ-пароль) при каждом сохранении дополнительно копируются туда, а при
+// каждом старте сервера подтягиваются обратно ДО того, как сервер начнёт
+// принимать запросы. Без этих двух переменных всё работает как раньше —
+// только на локальном диске (и слетает при перезапуске на бесплатном Render).
+const UPSTASH_URL = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/$/, '');
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const REDIS_ENABLED = !!(UPSTASH_URL && UPSTASH_TOKEN);
+
+// Upstash REST API: команда шлётся POST-ом на корневой endpoint с телом вида
+// ["SET", key, value] / ["GET", key] — значение в теле запроса, а не в пути
+// URL. Это важно, потому что каналы/подписки/лента — это JSON-объекты, и
+// первый вариант (значение в самом пути URL) либо упирается в лимит длины
+// URL, либо ломается на экранировании кавычек/фигурных скобок в большом JSON.
+async function redisCommand(args) {
+  if (!REDIS_ENABLED) return null;
+  try {
+    const res = await axios.post(UPSTASH_URL, args, {
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 8000
+    });
+    return res.data || null;
+  } catch (err) {
+    console.log(`[Redis] команда ${args[0]} ошибка:`, err.message);
+    return null;
+  }
+}
+
+async function redisGet(key) {
+  const data = await redisCommand(['GET', key]);
+  return (data && data.result != null) ? data.result : null;
+}
+
+// Фоновая запись — не блокирует и не ждёт ответа: это резервная копия,
+// а не основной путь чтения/записи, сетевая заминка не должна тормозить сайт.
+function redisSet(key, value) {
+  redisCommand(['SET', key, JSON.stringify(value)]);
+}
+
 const PORT = process.env.PORT || 3000;
 const POLL_MS = 10000; // частота обновления парсера — 10 секунд
 const DATA_DIR = path.join(__dirname, 'data');
+
+// НАЙДЕННЫЙ ПРИ ТЕСТИРОВАНИИ БАГ (та же природа, что и с логами ранее): если
+// заполнять REDIS_KEY_MAP через ссылки на константы вида CHANNELS_FILE, TG_ADMINS_FILE
+// и т.п., то это приходится делать уже ПОСЛЕ их объявления — а часть из них (LOGS_FILE,
+// TG_SUBS_FILE...) объявляется гораздо ниже по файлу, уже после первой же
+// бутстрап-записи каналов при самом первом старте сервера. В результате
+// первая запись дефолтных каналов происходила ДО того как карта заполнена, и
+// её нечем было бэкапить в Redis. Строим карту сразу по литеральным путям —
+// без зависимости от порядка объявления остальных констант.
+const REDIS_KEY_MAP = {
+  [path.join(DATA_DIR, 'channels.json')]: 'bgdalert:channels',
+  [path.join(DATA_DIR, 'subscriptions.json')]: 'bgdalert:subscriptions',
+  [path.join(DATA_DIR, 'telegram-subs.json')]: 'bgdalert:telegram-subs',
+  [path.join(DATA_DIR, 'telegram-admins.json')]: 'bgdalert:telegram-admins',
+  [path.join(DATA_DIR, 'alarm-config.json')]: 'bgdalert:alarm-config',
+  [path.join(DATA_DIR, 'channel-regions.json')]: 'bgdalert:channel-regions',
+  [path.join(DATA_DIR, 'state.json')]: 'bgdalert:state',
+  [path.join(DATA_DIR, 'analytics.json')]: 'bgdalert:analytics',
+  [path.join(DATA_DIR, 'logs.json')]: 'bgdalert:logs',
+  [path.join(DATA_DIR, 'custom-filters.json')]: 'bgdalert:custom-filters'
+};
 const SUBS_FILE = path.join(DATA_DIR, 'subscriptions.json');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const ANALYTICS_FILE = path.join(DATA_DIR, 'analytics.json');
@@ -96,12 +167,20 @@ if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
 }
 webpush.setVapidDetails('mailto:admin@example.com', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 
-// ===== Хранилище подписок и состояния (простые JSON-файлы) =====
 function loadJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf-8')); } catch (e) { return fallback; }
 }
+// Пока не завершится восстановление из Redis при старте (см. hydrateFromRedis),
+// saveJson НЕ пишет в Redis — иначе бутстрап-записи вида "файла ещё нет,
+// запишем дефолт" (например дефолтные каналы при самом первом старте) успевали
+// затереть в Redis уже сохранённые ранее реальные данные ДО того, как сервер
+// вообще успевал их оттуда прочитать. Найдено тестированием запуска, не
+// просто чтением кода.
+let redisSyncReady = false;
 function saveJson(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf-8');
+  const key = REDIS_KEY_MAP[file];
+  if (key && redisSyncReady) redisSet(key, data);
 }
 let subscriptions = loadJson(SUBS_FILE, []); // [{ subscription, regions, sound, vibro }]
 
@@ -160,17 +239,20 @@ let analytics = loadJson(ANALYTICS_FILE, {
 // функции) не вызывалась вообще — новые визиты переставали сохраняться, и
 // вкладка «Статистика» в админке навсегда замирала на "—". Теперь недостающие
 // поля подставляются сразу после загрузки, самостоятельно "подлечивая" старый файл.
-analytics.totalVisits = analytics.totalVisits || 0;
-analytics.uniqueVisitors = Array.isArray(analytics.uniqueVisitors) ? analytics.uniqueVisitors : [];
-analytics.dailyCounts = analytics.dailyCounts || {};
-analytics.hourlyToday = analytics.hourlyToday || { day: null, hours: new Array(24).fill(0) };
-if (!Array.isArray(analytics.hourlyToday.hours) || analytics.hourlyToday.hours.length !== 24) {
-  analytics.hourlyToday = { day: null, hours: new Array(24).fill(0) };
+function normalizeAnalytics() {
+  analytics.totalVisits = analytics.totalVisits || 0;
+  analytics.uniqueVisitors = Array.isArray(analytics.uniqueVisitors) ? analytics.uniqueVisitors : [];
+  analytics.dailyCounts = analytics.dailyCounts || {};
+  analytics.hourlyToday = analytics.hourlyToday || { day: null, hours: new Array(24).fill(0) };
+  if (!Array.isArray(analytics.hourlyToday.hours) || analytics.hourlyToday.hours.length !== 24) {
+    analytics.hourlyToday = { day: null, hours: new Array(24).fill(0) };
+  }
+  analytics.referrers = analytics.referrers || {};
+  analytics.devices = analytics.devices || { mobile: 0, desktop: 0, tablet: 0 };
+  analytics.browsers = analytics.browsers || {};
+  analytics.recent = Array.isArray(analytics.recent) ? analytics.recent : [];
 }
-analytics.referrers = analytics.referrers || {};
-analytics.devices = analytics.devices || { mobile: 0, desktop: 0, tablet: 0 };
-analytics.browsers = analytics.browsers || {};
-analytics.recent = Array.isArray(analytics.recent) ? analytics.recent : [];
+normalizeAnalytics();
 let analyticsDirty = false;
 function saveAnalyticsSoon() {
   analyticsDirty = true;
@@ -221,6 +303,68 @@ let tgPendingAction = {}; // chatId -> 'add_channel' (ждём текстовы�
 let tgFeedCache = {};     // chatId -> [id, id, ...] — индекс кнопки → реальный id записи ленты
                           // (id записей могут быть длиннее лимита callback_data в 64 байта,
                           // поэтому в кнопках передаём короткий индекс, а не сам id)
+
+// Вызывается один раз при старте, ДО того как сервер начинает принимать
+// запросы — подтягивает последнюю сохранённую копию каждого файла из Redis
+// (если он настроен) поверх того, что успело/не успело сохраниться на
+// локальном диске, и сразу же кэширует её обратно на диск.
+async function hydrateFromRedis() {
+  if (!REDIS_ENABLED) { redisSyncReady = true; return; }
+  console.log('[Redis] восстанавливаю данные после перезапуска…');
+  const targets = [
+    { file: CHANNELS_FILE, key: 'bgdalert:channels', apply: (v) => { channels = v; } },
+    { file: SUBS_FILE, key: 'bgdalert:subscriptions', apply: (v) => { subscriptions = v; } },
+    { file: TG_SUBS_FILE, key: 'bgdalert:telegram-subs', apply: (v) => { tgSubscriptions = v; } },
+    { file: TG_ADMINS_FILE, key: 'bgdalert:telegram-admins', apply: (v) => { tgAdmins = v; } },
+    { file: ALARM_CONFIG_FILE, key: 'bgdalert:alarm-config', apply: (v) => { alarmConfig = v; } },
+    { file: CHANNEL_REGIONS_FILE, key: 'bgdalert:channel-regions', apply: (v) => { channelRegionOverride = v; } },
+    { file: STATE_FILE, key: 'bgdalert:state', apply: (v) => { state = v; } },
+    { file: ANALYTICS_FILE, key: 'bgdalert:analytics', apply: (v) => { analytics = v; normalizeAnalytics(); } },
+    { file: LOGS_FILE, key: 'bgdalert:logs', apply: (v) => { logs = v; } },
+    { file: CUSTOM_FILTERS_FILE, key: 'bgdalert:custom-filters', apply: (v) => { customFilterWords = v; } }
+  ];
+  let restored = 0;
+  for (const t of targets) {
+    const raw = await redisGet(t.key);
+    if (raw == null) {
+      // В Redis для этого ключа ещё ничего нет (например, самый первый запуск) —
+      // сразу отправляем туда то, что уже есть на диске, не дожидаясь случайного
+      // следующего вызова saveJson. Но если и на диске файла ещё нет (например,
+      // analytics.json появляется только при первом реальном визите на сайт) —
+      // loadJson вернёт null, и его в Redis отправлять не нужно: иначе при
+      // следующем перезапуске этот null "восстановился" бы как настоящие
+      // данные и затёр бы нормальные значения по умолчанию.
+      const current = loadJson(t.file, null);
+      if (current != null) redisSet(t.key, current);
+      continue;
+    }
+    try {
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (parsed == null) continue; // защита от случайно сохранённого null
+      t.apply(parsed);
+      fs.writeFileSync(t.file, JSON.stringify(parsed, null, 2), 'utf-8');
+      restored++;
+    } catch (err) {
+      console.log(`[Redis] не удалось разобрать сохранённые данные (${t.key}):`, err.message);
+    }
+  }
+  // Пароль администратора — восстанавливаем из Redis, только если он НЕ задан
+  // явно через переменную окружения (env всегда в приоритете).
+  if (!process.env.ADMIN_PASSWORD) {
+    const savedPw = await redisGet('bgdalert:admin-password');
+    if (savedPw) {
+      ADMIN_PASSWORD = savedPw;
+      saveJson(ADMIN_PASSWORD_FILE, { password: ADMIN_PASSWORD });
+      console.log('[Redis] ADMIN_PASSWORD восстановлен из Redis.');
+    } else {
+      redisSet('bgdalert:admin-password', ADMIN_PASSWORD);
+    }
+  }
+  console.log(`[Redis] готово — восстановлено файлов: ${restored}`);
+  addLog('info', `Redis: данные восстановлены после перезапуска (${restored} файлов)`);
+  redisSyncReady = true;
+}
+
 
 function saveTgSubs() { saveJson(TG_SUBS_FILE, tgSubscriptions); }
 
@@ -776,6 +920,35 @@ function stripLinks(text) {
     .trim();
 }
 
+// ===== Стоп-слова, настраиваемые из админки =====
+// В отличие от AD_PATTERNS (который отбрасывает подозрительное сообщение
+// целиком) — это точечное вырезание конкретных слов/фраз из ИНАЧЕ нормального
+// оповещения: «сообщение парсится, но не всё». Например, если канал вставляет
+// название рекламируемого товара прямо в текст оповещения, админ добавляет
+// это слово сюда — само оповещение остаётся, конкретное слово вырезается.
+const CUSTOM_FILTERS_FILE = path.join(DATA_DIR, 'custom-filters.json');
+let customFilterWords = loadJson(CUSTOM_FILTERS_FILE, []); // ['слово или фраза', ...]
+function saveCustomFilterWords() { saveJson(CUSTOM_FILTERS_FILE, customFilterWords); }
+
+function stripCustomWords(text) {
+  if (!customFilterWords.length) return text;
+  return text
+    .split('\n')
+    .map((line) => {
+      let out = line;
+      customFilterWords.forEach((w) => {
+        if (!w) return;
+        const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        out = out.replace(new RegExp(escaped, 'gi'), '');
+      });
+      return out.replace(/[ \t]{2,}/g, ' ').trim();
+    })
+    .filter((line) => line.length > 0 && /[a-zA-Zа-яА-ЯёЁ]/.test(line))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function detectRegion(text) {
   const lower = text.toLowerCase();
   for (const [key, words] of REGION_KEYWORDS) {
@@ -925,7 +1098,7 @@ async function fetchChannelMessages(channel) {
 }
 
 function formatFeedItem(msg) {
-  const cleanText = stripLinks(msg.text);
+  const cleanText = stripCustomWords(stripLinks(msg.text));
   const cls = classify(cleanText);
   const region = channelRegionOverride[msg.channel] || detectRegion(cleanText);
   const hasRealTime = !!msg.datetime;
@@ -1267,6 +1440,32 @@ app.delete('/api/admin/channels', requireAdmin, (req, res) => {
   res.json({ ok: true, channels });
 });
 
+// ===== Стоп-слова (точечное вырезание слов/фраз из текста оповещений) =====
+app.get('/api/admin/filter-words', requireAdmin, (req, res) => {
+  res.json({ words: customFilterWords });
+});
+
+app.post('/api/admin/filter-words', requireAdmin, (req, res) => {
+  const word = ((req.body || {}).word || '').trim();
+  if (!word) return res.status(400).json({ error: 'empty word' });
+  if (customFilterWords.some((w) => w.toLowerCase() === word.toLowerCase())) {
+    return res.status(409).json({ error: 'already added' });
+  }
+  customFilterWords.push(word);
+  saveCustomFilterWords();
+  addLog('info', `Добавлено стоп-слово: «${word}»`);
+  res.json({ ok: true, words: customFilterWords });
+});
+
+app.delete('/api/admin/filter-words', requireAdmin, (req, res) => {
+  const word = ((req.body || {}).word || '').trim();
+  if (!word) return res.status(400).json({ error: 'empty word' });
+  customFilterWords = customFilterWords.filter((w) => w.toLowerCase() !== word.toLowerCase());
+  saveCustomFilterWords();
+  addLog('info', `Удалено стоп-слово: «${word}»`);
+  res.json({ ok: true, words: customFilterWords });
+});
+
 // ===== Настройки звуковой тревоги (какие типы/районы дают громкий push) =====
 app.get('/api/admin/alarm-config', requireAdmin, (req, res) => {
   res.json(alarmConfig);
@@ -1425,9 +1624,12 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'internal error: ' + err.message });
 });
 
-app.listen(PORT, () => {
-  console.log(`Тревога · Белгород — сервер запущен на порту ${PORT}`);
-  addLog('info', `Сервер запущен на порту ${PORT}`);
-  pollOnce();
-  setInterval(pollOnce, POLL_MS);
-});
+(async () => {
+  await hydrateFromRedis();
+  app.listen(PORT, () => {
+    console.log(`Тревога · Белгород — сервер запущен на порту ${PORT}`);
+    addLog('info', `Сервер запущен на порту ${PORT}`);
+    pollOnce();
+    setInterval(pollOnce, POLL_MS);
+  });
+})();

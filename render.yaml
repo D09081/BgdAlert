@@ -29,6 +29,16 @@ services:
         sync: false
       - key: TELEGRAM_BOT_USERNAME
         sync: false
+      # Постоянное хранение каналов/подписок/ленты между перезапусками на
+      # бесплатном тарифе (диск иначе стирается при каждом рестарте/сне) —
+      # бесплатная Redis-база на https://upstash.com, без карты.
+      # Скопировать REST URL и REST TOKEN из консоли Upstash.
+      # Без этих двух переменных всё работает как раньше, но данные слетают
+      # при каждом перезапуске сервиса.
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
       - key: NODE_VERSION
         value: 20.11.0
     # Персистентный диск — ОПЦИОНАЛЬНО и требует платного инстанс-типа на Render
