@@ -184,7 +184,10 @@ function saveJson(file, data) {
 }
 let subscriptions = loadJson(SUBS_FILE, []); // [{ subscription, regions, sound, vibro }]
 
-let state = loadJson(STATE_FILE, { seenIds: [], feed: [] });
+let state = loadJson(STATE_FILE, { seenIds: [], feed: [], deletedIds: [] });
+// На случай если state загружен из старого файла/Redis, где deletedIds ещё не было —
+// без этого удалённые из ленты записи возвращались бы обратно на первом же опросе.
+if (!Array.isArray(state.deletedIds)) state.deletedIds = [];
 let channels = loadJson(CHANNELS_FILE, ['mchs31', 'LiveOnlain']);
 if (!fs.existsSync(CHANNELS_FILE)) saveJson(CHANNELS_FILE, channels);
 
@@ -360,6 +363,7 @@ async function hydrateFromRedis() {
       redisSet('bgdalert:admin-password', ADMIN_PASSWORD);
     }
   }
+  if (!Array.isArray(state.deletedIds)) state.deletedIds = [];
   console.log(`[Redis] готово — восстановлено файлов: ${restored}`);
   addLog('info', `Redis: данные восстановлены после перезапуска (${restored} файлов)`);
   redisSyncReady = true;
@@ -385,7 +389,7 @@ async function tgCall(method, params, timeoutMs) {
   }
 }
 
-function regionKeyboard(prefix, withAdminButton) {
+function regionKeyboard(prefix) {
   const rows = [[{ text: '🌍 Вся область', callback_data: `${prefix}:all` }]];
   const regionEntries = Object.entries(REGION_NAMES);
   for (let i = 0; i < regionEntries.length; i += 2) {
@@ -393,7 +397,6 @@ function regionKeyboard(prefix, withAdminButton) {
     if (regionEntries[i + 1]) row.push({ text: regionEntries[i + 1][1], callback_data: `${prefix}:${regionEntries[i + 1][0]}` });
     rows.push(row);
   }
-  if (withAdminButton) rows.push([{ text: '🛠 Я администратор сайта', callback_data: 'tga:loginprompt' }]);
   return { inline_keyboard: rows };
 }
 
@@ -547,27 +550,6 @@ function buildFeedText() {
   return lines.join('\n');
 }
 
-async function tryAdminLogin(chatId, password, messageIdToDelete) {
-  if (messageIdToDelete) {
-    // Сразу удаляем сообщение с паролем из чата — не оставляем его
-    // открытым текстом в истории переписки дольше, чем необходимо.
-    await tgCall('deleteMessage', { chat_id: chatId, message_id: messageIdToDelete });
-  }
-  if (password !== ADMIN_PASSWORD) {
-    addLog('warn', 'Telegram: неудачная попытка входа в админку из чата ' + chatId);
-    await tgCall('sendMessage', { chat_id: chatId, text: '❌ Неверный пароль.' });
-    return;
-  }
-  if (!isTgAdmin(chatId)) { tgAdmins.push(chatId); saveTgAdmins(); }
-  addLog('info', 'Telegram: вход в админку из чата ' + chatId);
-  await tgCall('sendMessage', {
-    chat_id: chatId,
-    text: '✅ Доступ администратора подтверждён.\n\n🛠 *Админ-меню*\n\nВыбери раздел:',
-    parse_mode: 'Markdown',
-    reply_markup: mainMenuKeyboard()
-  });
-}
-
 async function tgHandleUpdate(update) {
   try {
     if (update.callback_query) {
@@ -577,7 +559,14 @@ async function tgHandleUpdate(update) {
       if (data.startsWith('tgregion:')) {
         const region = data.slice('tgregion:'.length);
         const idx = tgSubscriptions.findIndex((s) => s.chatId === chatId);
-        const entry = { chatId, regions: [region], joinedAt: idx >= 0 ? tgSubscriptions[idx].joinedAt : Date.now() };
+        const from = cq.from || {};
+        const entry = {
+          chatId,
+          regions: [region],
+          joinedAt: idx >= 0 ? tgSubscriptions[idx].joinedAt : Date.now(),
+          username: from.username || null,
+          firstName: from.first_name || null
+        };
         if (idx >= 0) tgSubscriptions[idx] = entry; else tgSubscriptions.push(entry);
         saveTgSubs();
         const label = region === 'all' ? 'вся область' : (REGION_NAMES[region] || region);
@@ -590,19 +579,9 @@ async function tgHandleUpdate(update) {
         addLog('info', `Telegram: подписка настроена, район ${region}`);
         return;
       }
-      // ===== Админ-панель бота: публикация тревоги/отбоя прямо из Telegram =====
-      if (data === 'tga:loginprompt') {
-        tgPendingAction[chatId] = 'awaiting_admin_password';
-        await tgCall('answerCallbackQuery', { callback_query_id: cq.id });
-        await tgCall('editMessageText', {
-          chat_id: chatId, message_id: cq.message.message_id,
-          text: '🔑 Пришли пароль администратора следующим сообщением.\n\n(Сообщение с паролем сразу удалится из чата.)'
-        });
-        return;
-      }
       if (data.startsWith('tga:')) {
         if (!isTgAdmin(chatId)) {
-          await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Доступ только для админов. Наберите /admin <пароль>.', show_alert: true });
+          await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Доступ только для админов. Доступ выдаёт администратор сайта.', show_alert: true });
           return;
         }
         const parts = data.split(':'); // tga:menu:stats  |  tga:type:rocket  |  tga:go:rocket:belgorod  |  ...
@@ -701,6 +680,10 @@ async function tgHandleUpdate(update) {
           const before = state.feed.length;
           state.feed = (state.feed || []).filter((it) => String(it.id) !== String(id));
           if (state.feed.length !== before) {
+            // Та же причина, по которой удаление "не работало": без пометки
+            // в deletedIds pollOnce возвращал запись обратно на следующем цикле.
+            if (!Array.isArray(state.deletedIds)) state.deletedIds = [];
+            if (!state.deletedIds.includes(String(id))) state.deletedIds.push(String(id));
             saveJson(STATE_FILE, state);
             addLog('info', `Telegram-админ ${chatId} удалил запись из ленты: ${id}`);
           }
@@ -715,14 +698,6 @@ async function tgHandleUpdate(update) {
     if (!msg || !msg.text) return;
     const chatId = msg.chat.id;
     const text = msg.text.trim();
-
-    // Если только что нажали "🛠 Я администратор сайта" — трактуем следующее
-    // сообщение как пароль, без необходимости печатать /admin руками.
-    if (tgPendingAction[chatId] === 'awaiting_admin_password' && !text.startsWith('/')) {
-      delete tgPendingAction[chatId];
-      await tryAdminLogin(chatId, text, msg.message_id);
-      return;
-    }
 
     // Если только что нажали "➕ Добавить канал" — трактуем следующее
     // обычное сообщение как username канала, а не как неизвестную команду.
@@ -747,7 +722,17 @@ async function tgHandleUpdate(update) {
 
     if (text === '/start' || text.startsWith('/start ')) {
       const idx = tgSubscriptions.findIndex((s) => s.chatId === chatId);
-      if (idx < 0) { tgSubscriptions.push({ chatId, regions: ['all'], joinedAt: Date.now() }); saveTgSubs(); addLog('info', 'Telegram: новый подписчик ' + chatId); }
+      const from = msg.from || {};
+      const subEntry = {
+        chatId,
+        regions: idx >= 0 ? tgSubscriptions[idx].regions : ['all'],
+        joinedAt: idx >= 0 ? tgSubscriptions[idx].joinedAt : Date.now(),
+        username: from.username || null,
+        firstName: from.first_name || null
+      };
+      if (idx >= 0) tgSubscriptions[idx] = subEntry; else tgSubscriptions.push(subEntry);
+      saveTgSubs();
+      if (idx < 0) addLog('info', 'Telegram: новый подписчик ' + chatId);
       if (isTgAdmin(chatId)) {
         await tgCall('sendMessage', { chat_id: chatId, text: '🛠 *Админ-меню*\n\nВыбери раздел:', parse_mode: 'Markdown', reply_markup: mainMenuKeyboard() });
       } else {
@@ -755,7 +740,7 @@ async function tgHandleUpdate(update) {
           chat_id: chatId,
           text: '🚨 *Тревога Белгород* — оповещения о ракетной опасности и БПЛА.\n\nПо умолчанию включена вся область. Выбери свой район, если нужны только его оповещения:',
           parse_mode: 'Markdown',
-          reply_markup: regionKeyboard('tgregion', true)
+          reply_markup: regionKeyboard('tgregion')
         });
       }
     } else if (text === '/region') {
@@ -766,22 +751,25 @@ async function tgHandleUpdate(update) {
       await tgCall('sendMessage', { chat_id: chatId, text: '🔕 Подписка отключена. Вернуться можно командой /start.' });
       addLog('info', 'Telegram: отписка ' + chatId);
     } else if (text.startsWith('/admin')) {
-      const password = text.slice('/admin'.length).trim();
-      if (!password) {
-        await tgCall('sendMessage', { chat_id: chatId, text: 'Использование: /admin ваш_пароль_админки\n\nИли просто нажми «🛠 Я администратор сайта» под сообщением /start.' });
-        return;
-      }
-      await tryAdminLogin(chatId, password, msg.message_id);
+      // Пароль внутри бота больше не работает — доступ администратора теперь
+      // выдаёт администратор сайта из вкладки «Админы Telegram» в веб-панели,
+      // по username или chat ID. Подсказываем chat ID на случай, если у
+      // пользователя нет @username, по которому его можно найти в списке.
+      await tgCall('sendMessage', {
+        chat_id: chatId,
+        text: `Доступ администратора теперь выдаётся с сайта (вкладка «Админы Telegram»), а не паролем в боте.\n\nТвой chat ID: \`${chatId}\`${msg.from && msg.from.username ? ` (username: @${msg.from.username})` : ''} — передай его администратору сайта, чтобы получить доступ.`,
+        parse_mode: 'Markdown'
+      });
     } else if (text === '/menu' || text === '/stats' || text === '/alert') {
-      if (!isTgAdmin(chatId)) { await tgCall('sendMessage', { chat_id: chatId, text: 'Доступ только для админов. Наберите /admin <пароль>.' }); return; }
+      if (!isTgAdmin(chatId)) { await tgCall('sendMessage', { chat_id: chatId, text: 'Доступ только для админов. Доступ выдаёт администратор сайта — набери /admin, чтобы узнать свой chat ID.' }); return; }
       await tgCall('sendMessage', { chat_id: chatId, text: '🛠 *Админ-меню*\n\nВыбери раздел:', parse_mode: 'Markdown', reply_markup: mainMenuKeyboard() });
     } else if (text === '/adminlogout') {
       tgAdmins = tgAdmins.filter((id) => id !== chatId);
       saveTgAdmins();
-      await tgCall('sendMessage', { chat_id: chatId, text: '👋 Вышли из режима администратора.' });
+      await tgCall('sendMessage', { chat_id: chatId, text: '👋 Вышли из режима администратора. Чтобы вернуться, попроси администратора сайта выдать доступ заново.' });
     } else {
       const base = 'Команды: /start — подписаться, /region — выбрать район, /stop — отписаться.';
-      const adminHint = isTgAdmin(chatId) ? '\n\nАдмин: /menu — открыть меню управления.' : '\n\nВы администратор сайта? Наберите /admin <пароль> для доступа к панели управления.';
+      const adminHint = isTgAdmin(chatId) ? '\n\nАдмин: /menu — открыть меню управления.' : '\n\nДоступ администратора выдаётся с сайта. /admin — узнать свой chat ID для этого.';
       await tgCall('sendMessage', { chat_id: chatId, text: base + adminHint });
     }
   } catch (err) {
@@ -972,9 +960,17 @@ const DIRECT_THREAT_RE = /обнаружен|зафиксирован|курс[�
 // если пост говорит о прошлом/итогах, это новость, а не живой сигнал.
 const NEWS_RECAP_RE = /(за (истекш|прошедш|отчётн)\w* сутк\w*|за (эту |прошлую |текущую )?недел\w*|итоги (дня|недели|суток|месяца)|сводка|статистик\w+ (за|по)|(^|[^a-zа-яё])вчера([^a-zа-яё]|$)|(^|[^a-zа-яё])позавчера([^a-zа-яё]|$)|на прошлой недел\w*|за (минувш\w* )?сутки было|всего за (сутки|неделю|день)|подвед[ея]м итоги|оперштаб (сообщ|информ)\w*|глава региона (рассказал|сообщил|отчитался))/i;
 
+// Байки/анекдоты про уже случившийся и благополучно закончившийся инцидент —
+// пишутся в повествовательном, часто ироничном тоне ("хозяевам повезло",
+// "упал без детонации", "никто не пострадал") и не требуют никаких действий
+// прямо сейчас, в отличие от настоящего оповещения ("летит БПЛА", "в укрытие").
+// Внешне похоже на тревогу (есть слово "БПЛА"/"дрон"), но по сути — новость.
+const RESOLVED_STORY_RE = /(жутко повезло|повезло[^.!?\n]{0,20}(упал|не сработал|не деton)|обошлось без|без детонаци\w*|никто не пострадал|к счастью[^.!?\n]{0,20}(никто|обошлось)|запутал\w* в (одежде|белье|проводах|ветвях)|самый важный объект)/i;
+
 function classify(text) {
   const lower = text.toLowerCase();
   if (NEWS_RECAP_RE.test(lower)) return { t: 'other', i: '📰', tag: 'Новостная сводка' };
+  if (RESOLVED_STORY_RE.test(lower)) return { t: 'other', i: '📰', tag: 'История без действия' };
 
   if (/отбой/.test(lower)) return { t: 'cancel', i: '✅', tag: 'Отбой / отмена' };
 
@@ -1172,6 +1168,16 @@ function dedupeItems(items) {
 // всё остальное (общие посты канала не по теме) в ленту не попадает.
 const ALERT_TYPES = ['rocket', 'drone', 'cancel', 'shelter', 'repeat', 'notice'];
 
+// Россия (в т.ч. Белгородская область) не переходит на летнее/зимнее время
+// с 2014 года — смещение Москвы всегда UTC+3, поэтому можно посчитать без
+// обращения к Intl/локали.
+const MOSCOW_OFFSET_MS = 3 * 60 * 60 * 1000;
+function startOfTodayMoscowMs() {
+  const shifted = Date.now() + MOSCOW_OFFSET_MS;
+  const shiftedMidnight = Math.floor(shifted / 86400000) * 86400000;
+  return shiftedMidnight - MOSCOW_OFFSET_MS;
+}
+
 // ===== Основной цикл опроса (сразу по всем каналам-источникам) =====
 async function pollOnce() {
   try {
@@ -1189,7 +1195,18 @@ async function pollOnce() {
 
     const fresh = raw.filter((m) => !isAd(m.text));
     const allItems = fresh.map(formatFeedItem).sort((a, b) => b.ts - a.ts);
-    const alertItems = allItems.filter((it) => ALERT_TYPES.includes(it.t));
+
+    // Только сегодняшние сообщения (по времени Белгорода/Москвы) — старые посты
+    // (вчера, неделю назад и т.п.), которые публичная страница t.me/s/канал всё
+    // ещё показывает, не должны попадать в ленту и уж тем более не должны слать
+    // уведомления в бот/push, как будто это свежая тревога.
+    const todayStart = startOfTodayMoscowMs();
+    const deletedSet = new Set((state.deletedIds || []).map(String));
+    const alertItems = allItems.filter((it) =>
+      ALERT_TYPES.includes(it.t) &&
+      it.ts >= todayStart &&
+      !deletedSet.has(String(it.id))
+    );
     const items = dedupeItems(alertItems);
 
     const seen = new Set(state.seenIds);
@@ -1214,6 +1231,11 @@ async function pollOnce() {
     // seenIds строим по ВСЕМ сообщениям канала (включая нерелевантные),
     // чтобы off-topic посты не пересчитывались и не «просачивались» после правок фильтра
     state.seenIds = allItems.slice(0, 200).map((it) => String(it.id));
+    // deletedIds храним по тому же принципу, что и seenIds — не бесконечно,
+    // достаточно последних записей, чтобы удалённое сегодня не вернулось.
+    if (Array.isArray(state.deletedIds) && state.deletedIds.length > 500) {
+      state.deletedIds = state.deletedIds.slice(-500);
+    }
     saveJson(STATE_FILE, state);
     lastPollOk = true;
     lastPollAt = Date.now();
@@ -1404,6 +1426,57 @@ app.get('/api/admin/logs', requireAdmin, (req, res) => {
 });
 
 // ===== Управление источниками (каналами) =====
+// ===== Админы Telegram-бота (выдаются с сайта, не паролем внутри бота) =====
+// Список всех, кто хоть раз писал /start боту — по нему сайт-админ находит
+// нужного человека (по username, если он есть, иначе по chat ID) и решает,
+// давать ли ему доступ к панели управления внутри Telegram.
+app.get('/api/admin/telegram-users', requireAdmin, (req, res) => {
+  const adminSet = new Set(tgAdmins);
+  const users = (tgSubscriptions || [])
+    .map((s) => ({
+      chatId: s.chatId,
+      username: s.username || null,
+      firstName: s.firstName || null,
+      regions: s.regions || [],
+      joinedAt: s.joinedAt || null,
+      isAdmin: adminSet.has(s.chatId)
+    }))
+    .sort((a, b) => (b.joinedAt || 0) - (a.joinedAt || 0));
+  res.json({ users });
+});
+
+app.post('/api/admin/telegram-admins', requireAdmin, async (req, res) => {
+  const chatId = Number((req.body || {}).chatId);
+  if (!chatId) return res.status(400).json({ error: 'chatId required' });
+  if (!tgAdmins.includes(chatId)) {
+    tgAdmins.push(chatId);
+    saveTgAdmins();
+    addLog('info', `Сайт-админ выдал доступ администратора Telegram-чату ${chatId}`);
+    try {
+      await tgCall('sendMessage', {
+        chat_id: chatId,
+        text: '✅ Тебе выдан доступ администратора. Набери /menu, чтобы открыть панель управления.'
+      });
+    } catch (err) { /* пользователь мог заблокировать бота — не критично */ }
+  }
+  res.json({ ok: true, tgAdmins });
+});
+
+app.delete('/api/admin/telegram-admins', requireAdmin, async (req, res) => {
+  const chatId = Number((req.body || {}).chatId);
+  if (!chatId) return res.status(400).json({ error: 'chatId required' });
+  const before = tgAdmins.length;
+  tgAdmins = tgAdmins.filter((id) => id !== chatId);
+  if (tgAdmins.length !== before) {
+    saveTgAdmins();
+    addLog('info', `Сайт-админ забрал доступ администратора у Telegram-чата ${chatId}`);
+    try {
+      await tgCall('sendMessage', { chat_id: chatId, text: '🚪 Доступ администратора отозван администратором сайта.' });
+    } catch (err) { /* пользователь мог заблокировать бота — не критично */ }
+  }
+  res.json({ ok: true, tgAdmins });
+});
+
 app.get('/api/admin/channels', requireAdmin, (req, res) => {
   res.json({ channels, channelHealth, channelRegions: channelRegionOverride });
 });
@@ -1616,6 +1689,11 @@ app.delete('/api/admin/feed/:id', requireAdmin, (req, res) => {
   const before = state.feed.length;
   state.feed = (state.feed || []).filter((it) => String(it.id) !== String(id));
   if (state.feed.length === before) return res.status(404).json({ error: 'not found' });
+  // Без этого следующий же опрос канала (pollOnce) снова находил это сообщение
+  // на публичной странице t.me/s/канал и добавлял его обратно в ленту —
+  // удаление "не работало" именно поэтому.
+  if (!Array.isArray(state.deletedIds)) state.deletedIds = [];
+  if (!state.deletedIds.includes(String(id))) state.deletedIds.push(String(id));
   saveJson(STATE_FILE, state);
   addLog('info', `Запись удалена из ленты: ${id}`);
   res.json({ ok: true, feed: state.feed });
