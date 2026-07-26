@@ -159,6 +159,7 @@
     <button class="tab-btn" data-tab="sources" type="button">📡 Источники</button>
     <button class="tab-btn" data-tab="alarm" type="button">🔔 Тревога</button>
     <button class="tab-btn" data-tab="manual" type="button">✍️ Ручная отправка</button>
+    <button class="tab-btn" data-tab="tgadmins" type="button">👤 Админы Telegram</button>
     <button class="tab-btn" data-tab="logs" type="button">🧾 Логи</button>
   </div>
 
@@ -365,6 +366,15 @@
     </div>
   </div>
 
+  <!-- ===== Вкладка: Админы Telegram ===== -->
+  <div class="tab-panel" id="tab-tgadmins">
+    <div class="panel">
+      <h2>👤 Админы Telegram-бота</h2>
+      <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">Доступ к панели управления внутри Telegram-бота (/menu) больше не выдаётся паролем в самом боте — только отсюда. Ниже все, кто хоть раз писал боту /start. Попроси человека нажать /start (или /admin, если хочешь узнать его chat ID без username) и найди его в списке.</p>
+      <div id="tgUsersList">—</div>
+    </div>
+  </div>
+
   <!-- ===== Вкладка: Логи ===== -->
   <div class="tab-panel" id="tab-logs">
     <div class="panel">
@@ -456,6 +466,7 @@ function showDashboard() {
   loadAlarmConfig();
   loadLogs();
   loadFeedList();
+  loadTgUsers();
   refreshTimer = setInterval(function() { loadStats(); loadLogs(); loadFeedList(); }, 20000);
 }
 
@@ -720,6 +731,55 @@ async function removeChannel(channel) {
     loadChannels();
   } catch (err) {
     toast(err.message === 'must keep at least one channel' ? 'Должен остаться хотя бы один источник' : 'Не удалось удалить канал: ' + err.message, 'err');
+  }
+}
+
+// ===== Админы Telegram-бота =====
+async function loadTgUsers() {
+  var box = document.getElementById('tgUsersList');
+  var data;
+  try {
+    data = await apiGet('/api/admin/telegram-users');
+  } catch (err) {
+    if (err.message !== 'unauthorized') { box.innerHTML = '<div class="empty-note">Ошибка загрузки: ' + escapeHtml(err.message) + '</div>'; }
+    return;
+  }
+  renderTgUsersList(data.users || []);
+}
+
+function renderTgUsersList(list) {
+  var box = document.getElementById('tgUsersList');
+  if (!list.length) { box.innerHTML = '<div class="empty-note">Пока никто не писал боту /start</div>'; return; }
+  box.innerHTML = list.map(function(u) {
+    var label = u.username ? ('@' + escapeHtml(u.username)) : (u.firstName ? escapeHtml(u.firstName) : 'без имени');
+    var btn = u.isAdmin
+      ? '<button class="quick-btn danger" style="padding:5px 10px;font-size:12px;" data-revoke-admin="' + u.chatId + '" type="button">Забрать доступ</button>'
+      : '<button class="btn secondary small" style="width:auto;padding:5px 10px;font-size:12px;" data-grant-admin="' + u.chatId + '" type="button">Выдать доступ</button>';
+    return '<div class="bar-row" style="align-items:center;flex-wrap:wrap;">' +
+      '<span style="width:9px;height:9px;border-radius:50%;background:' + (u.isAdmin ? 'var(--green)' : 'var(--text-secondary)') + ';flex-shrink:0;"></span>' +
+      '<span class="bar-label" style="width:auto;flex:1;color:var(--text);word-break:break-all;">' + label +
+        '<span style="color:var(--text-secondary);font-size:11px;"> · id ' + u.chatId + '</span>' +
+        (u.isAdmin ? ' <span style="color:var(--green);font-size:11px;">· админ</span>' : '') +
+      '</span>' +
+      btn +
+      '</div>';
+  }).join('');
+  box.querySelectorAll('[data-grant-admin]').forEach(function(btn) {
+    btn.addEventListener('click', function() { setTgAdmin(Number(btn.getAttribute('data-grant-admin')), true); });
+  });
+  box.querySelectorAll('[data-revoke-admin]').forEach(function(btn) {
+    btn.addEventListener('click', function() { setTgAdmin(Number(btn.getAttribute('data-revoke-admin')), false); });
+  });
+}
+
+async function setTgAdmin(chatId, grant) {
+  try {
+    if (grant) await apiPost('/api/admin/telegram-admins', { chatId: chatId });
+    else await apiPost('/api/admin/telegram-admins', { chatId: chatId }, 'DELETE');
+    toast(grant ? 'Доступ выдан' : 'Доступ отозван', 'ok');
+    loadTgUsers();
+  } catch (err) {
+    toast('Не удалось изменить доступ: ' + err.message, 'err');
   }
 }
 
