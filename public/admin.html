@@ -213,6 +213,17 @@
     </div>
 
     <div class="panel">
+      <h2>✂️ Стоп-слова и фразы</h2>
+      <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">Если в сообщении есть слово/фраза из списка — она вырезается из текста (например, название рекламируемого товара, лишняя подпись канала), а само оповещение остаётся и публикуется как обычно. Это не блокирует весь пост — только конкретные слова в нём.</p>
+      <div id="filterWordsList" style="margin-bottom:14px;">—</div>
+      <div class="form-row">
+        <label>Добавить слово или фразу</label>
+        <input type="text" id="newFilterWordInput" placeholder="например: скидка 50%">
+      </div>
+      <button class="btn secondary small" id="addFilterWordBtn" type="button">Добавить стоп-слово</button>
+    </div>
+
+    <div class="panel">
       <h2>📍 Подписчики push по районам</h2>
       <div id="subsByRegionList">—</div>
     </div>
@@ -425,6 +436,7 @@ function showDashboard() {
   document.getElementById('dashboard').style.display = 'block';
   loadStats();
   loadChannels();
+  loadFilterWords();
   loadAlarmConfig();
   loadLogs();
   loadFeedList();
@@ -687,6 +699,53 @@ async function removeChannel(channel) {
   }
 }
 
+async function loadFilterWords() {
+  try {
+    var data = await apiGet('/api/admin/filter-words');
+    renderFilterWordsList(data.words || []);
+  } catch (err) {
+    document.getElementById('filterWordsList').innerHTML = '<div class="empty-note">Ошибка загрузки: ' + escapeHtml(err.message) + '</div>';
+  }
+}
+
+function renderFilterWordsList(list) {
+  var box = document.getElementById('filterWordsList');
+  if (!list.length) { box.innerHTML = '<div class="empty-note">Стоп-слов пока нет</div>'; return; }
+  box.innerHTML = list.map(function(w) {
+    return '<div class="bar-row" style="align-items:center;">' +
+      '<span class="bar-label" style="width:auto;flex:1;color:var(--text);word-break:break-all;">' + escapeHtml(w) + '</span>' +
+      '<button class="quick-btn danger" style="padding:5px 10px;font-size:12px;" data-remove-filter-word="' + escapeHtml(w) + '" type="button">Удалить</button>' +
+      '</div>';
+  }).join('');
+  box.querySelectorAll('[data-remove-filter-word]').forEach(function(btn) {
+    btn.addEventListener('click', function() { removeFilterWord(btn.getAttribute('data-remove-filter-word')); });
+  });
+}
+
+async function addFilterWord() {
+  var input = document.getElementById('newFilterWordInput');
+  var val = input.value.trim();
+  if (!val) { toast('Введите слово или фразу', 'err'); return; }
+  try {
+    var data = await apiPost('/api/admin/filter-words', { word: val });
+    toast('Стоп-слово добавлено', 'ok');
+    input.value = '';
+    renderFilterWordsList(data.words);
+  } catch (err) {
+    toast(err.message === 'already added' ? 'Такое слово уже в списке' : 'Не удалось добавить: ' + err.message, 'err');
+  }
+}
+
+async function removeFilterWord(word) {
+  try {
+    await apiPost('/api/admin/filter-words', { word: word }, 'DELETE');
+    toast('Стоп-слово удалено', 'ok');
+    loadFilterWords();
+  } catch (err) {
+    toast('Не удалось удалить: ' + err.message, 'err');
+  }
+}
+
 // ===== Настройки звуковой тревоги =====
 var ALARM_TYPE_LABELS = {
   rocket: '🚀 Ракетная опасность / авиаудар', drone: '🛸 БПЛА обнаружен', cancel: '✅ Отбой',
@@ -836,6 +895,8 @@ function initHandlers() {
   document.getElementById('logoutBtn').addEventListener('click', function() { clearToken(); showLogin(); });
   document.getElementById('sendMsgBtn').addEventListener('click', sendManualMessage);
   document.getElementById('addChannelBtn').addEventListener('click', addChannel);
+  document.getElementById('addFilterWordBtn').addEventListener('click', addFilterWord);
+  document.getElementById('newFilterWordInput').addEventListener('keydown', function(e) { if (e.key === 'Enter') addFilterWord(); });
   document.getElementById('saveAlarmBtn').addEventListener('click', saveAlarmConfig);
   document.getElementById('refreshLogsBtn').addEventListener('click', loadLogs);
   document.querySelectorAll('[data-log-filter]').forEach(function(btn) {
