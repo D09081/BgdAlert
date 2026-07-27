@@ -385,7 +385,12 @@ async function tgCall(method, params, timeoutMs) {
       return { ok: true, result: [] };
     }
     addLog('error', `Telegram API ошибка (${method}): ` + (err.response?.data?.description || err.message));
-    return null;
+    // Telegram отвечает конкретным телом с ok:false/error_code (403 — бот
+    // заблокирован, 429 — превышен лимит запросов и т.п.) — раньше это тело
+    // терялось и вызывающий код получал просто null, из-за чего обработка
+    // 403/429 у вызывающих функций фактически никогда не срабатывала.
+    // Отдаём null только на настоящий сетевой сбой (нет ответа вообще).
+    return err.response ? err.response.data : null;
   }
 }
 
@@ -718,7 +723,7 @@ async function tgHandleUpdate(update) {
         await tgCall('sendMessage', { chat_id: chatId, text: '❌ Не удалось распознать канал. Пришли просто username, например mchs31.' });
         return;
       }
-      if (channels.includes(parsed)) {
+      if (channels.some((c) => c.toLowerCase() === parsed.toLowerCase())) {
         await tgCall('sendMessage', { chat_id: chatId, text: `Канал @${escMd(parsed)} уже добавлен.`, parse_mode: 'Markdown', reply_markup: channelsKeyboard() });
         return;
       }
@@ -826,6 +831,8 @@ if (TG_API) {
   console.log('[i] TELEGRAM_BOT_TOKEN не задан — Telegram-канал оповещений отключён (сайт и push работают как обычно).');
 }
 
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
 async function notifyTelegramSubscribers(item) {
   if (!TG_API || !tgSubscriptions.length) return;
   const isUrgent = isAlarmTriggering(item);
@@ -836,12 +843,24 @@ async function notifyTelegramSubscribers(item) {
   for (const entry of tgSubscriptions) {
     const matches = item.region === 'all' || (entry.regions && (entry.regions.includes('all') || entry.regions.includes(item.region)));
     if (!matches) { stillValid.push(entry); continue; }
-    const result = await tgCall('sendMessage', { chat_id: entry.chatId, text, parse_mode: 'Markdown' });
+    let result = await tgCall('sendMessage', { chat_id: entry.chatId, text, parse_mode: 'Markdown' });
+    // Telegram отдаёт 429 (Too Many Requests), если слать много сообщений подряд
+    // без пауз — один раз честно ждём подсказанное время и пробуем ещё раз,
+    // вместо того чтобы просто терять сообщение с ошибкой в логе.
+    if (result && result.ok === false && result.error_code === 429) {
+      const retryAfterSec = (result.parameters && result.parameters.retry_after) || 2;
+      await sleep(retryAfterSec * 1000);
+      result = await tgCall('sendMessage', { chat_id: entry.chatId, text, parse_mode: 'Markdown' });
+    }
     // Код 403 = пользователь заблокировал бота — удаляем такого подписчика,
     // как это уже делается для "умерших" web push подписок (404/410).
     if (result === null) { /* сетевая/временная ошибка — не удаляем, оставляем как есть */ stillValid.push(entry); }
     else if (result.ok === false && result.error_code === 403) { addLog('info', `Telegram: подписчик ${entry.chatId} заблокировал бота, удалён из списка`); }
     else stillValid.push(entry);
+    // Небольшая пауза между отправками — Telegram ограничивает примерно
+    // 30 сообщений в секунду на бота в целом, при рассылке многим подписчикам
+    // подряд без пауз это легко превысить и словить 429 у части из них.
+    await sleep(40);
   }
   tgSubscriptions = stillValid;
   saveTgSubs();
@@ -977,10 +996,18 @@ const NEWS_RECAP_RE = /(за (истекш|прошедш|отчётн)\w* су�
 // Внешне похоже на тревогу (есть слово "БПЛА"/"дрон"), но по сути — новость.
 const RESOLVED_STORY_RE = /(жутко повезло|повезло[^.!?\n]{0,20}(упал|не сработал|не деton)|обошлось без|без детонаци\w*|никто не пострадал|к счастью[^.!?\n]{0,20}(никто|обошлось)|запутал\w* в (одежде|белье|проводах|ветвях)|самый важный объект)/i;
 
+// Эмоциональные обращения/воззвания к жителям («Дорогие белгородцы...», с оскорблениями
+// в адрес противника, общими советами вроде «не берите с собой детей») — используют те
+// же ключевые слова, что настоящие тревоги (БПЛА, «атакует»), но это агитационный или
+// эмоциональный пост, а не сигнал «прямо сейчас» с конкретным местом/действием. Поднимать
+// по такому тревогу (звук/вибрация/красный статус всем подписчикам) не нужно.
+const APPEAL_RANT_RE = /(дорогие белгородц\w*|дорогие жител\w*|гнид[ыа]\b|свинь\w*[^.!?\n]{0,20}не важно|трус\w+ вою\w*|не подвергайте себя опасност)/i;
+
 function classify(text) {
   const lower = text.toLowerCase();
   if (NEWS_RECAP_RE.test(lower)) return { t: 'other', i: '📰', tag: 'Новостная сводка' };
   if (RESOLVED_STORY_RE.test(lower)) return { t: 'other', i: '📰', tag: 'История без действия' };
+  if (APPEAL_RANT_RE.test(lower)) return { t: 'other', i: '📰', tag: 'Обращение' };
 
   if (/отбой/.test(lower)) return { t: 'cancel', i: '✅', tag: 'Отбой / отмена' };
 
@@ -1189,6 +1216,20 @@ function startOfTodayMoscowMs() {
 }
 
 // ===== Основной цикл опроса (сразу по всем каналам-источникам) =====
+// bootGraceActive: при каждом перезапуске сервера state.seenIds теряется,
+// если Redis не настроен (на бесплатных VPS/Render это обычный случай —
+// диск не переживает деплой/рестарт). Без этой защиты первый же опрос после
+// рестарта видит все сегодняшние сообщения как "новые" и рассылает их всем
+// подписчикам ещё раз — то самое "куча сообщений, которые уже были".
+// Поэтому на первом опросе после старта: лента и seenIds заполняются как
+// обычно (сайт сразу видит сегодняшние сообщения), а рассылка (push +
+// Telegram) — нет. Правда, есть и обратная сторона: если сервер перезапустится
+// ровно в момент настоящей новой тревоги, именно это первое сообщение тоже не
+// разошлётся — плата за то, чтобы рестарт не превращался в спам-рассылку.
+// Чтобы вообще не выбирать между этими двумя сценариями — см. README про
+// подключение Upstash Redis, тогда seenIds переживает рестарт по-честному.
+let bootGraceActive = true;
+
 async function pollOnce() {
   try {
     let raw = [];
@@ -1225,12 +1266,17 @@ async function pollOnce() {
     if (newItems.length) {
       newItems.forEach((it) => { it.isNew = true; });
       addLog('info', `Новых сообщений в ленте: ${newItems.length}`, { types: newItems.map((it) => it.t) });
-      // помечаем как новые только первые несколько минут — на фронте это условно,
-      // здесь просто фиксируем факт появления для push-рассылки
-      for (const it of newItems) {
-        await notifySubscribers(it);
+      if (bootGraceActive) {
+        addLog('info', `Первый опрос после запуска сервера — ${newItems.length} сообщений тихо приняты как известные, без рассылки (защита от повторной рассылки уже опубликованного после рестарта)`);
+      } else {
+        // помечаем как новые только первые несколько минут — на фронте это условно,
+        // здесь просто фиксируем факт появления для push-рассылки
+        for (const it of newItems) {
+          await notifySubscribers(it);
+        }
       }
     }
+    bootGraceActive = false;
 
     // Ручные сообщения (отправленные из админки) не приходят из парсера каналов —
     // сохраняем их поверх свежей выборки, иначе следующий же цикл опроса их сотрёт.
@@ -1498,7 +1544,7 @@ app.post('/api/admin/channel-region', requireAdmin, (req, res) => {
   const parsed = parseChannelInput((req.body || {}).channel);
   const region = (req.body || {}).region;
   if (!parsed) return res.status(400).json({ error: 'invalid channel' });
-  if (!channels.includes(parsed)) return res.status(404).json({ error: 'unknown channel' });
+  if (!channels.some((c) => c.toLowerCase() === parsed.toLowerCase())) return res.status(404).json({ error: 'unknown channel' });
   if (!region || region === 'auto') {
     delete channelRegionOverride[parsed];
   } else if (REGION_NAMES[region] || region === 'all') {
@@ -1514,7 +1560,7 @@ app.post('/api/admin/channel-region', requireAdmin, (req, res) => {
 app.post('/api/admin/channels', requireAdmin, (req, res) => {
   const parsed = parseChannelInput((req.body || {}).channel);
   if (!parsed) return res.status(400).json({ error: 'invalid channel' });
-  if (channels.includes(parsed)) return res.status(409).json({ error: 'already added' });
+  if (channels.some((c) => c.toLowerCase() === parsed.toLowerCase())) return res.status(409).json({ error: 'already added' });
   channels.push(parsed);
   saveJson(CHANNELS_FILE, channels);
   addLog('info', `Добавлен канал-источник: @${parsed}`);
