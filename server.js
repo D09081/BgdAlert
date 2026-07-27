@@ -1003,11 +1003,19 @@ const RESOLVED_STORY_RE = /(жутко повезло|повезло[^.!?\n]{0,2
 // по такому тревогу (звук/вибрация/красный статус всем подписчикам) не нужно.
 const APPEAL_RANT_RE = /(дорогие белгородц\w*|дорогие жител\w*|гнид[ыа]\b|свинь\w*[^.!?\n]{0,20}не важно|трус\w+ вою\w*|не подвергайте себя опасност)/i;
 
+// Отчёты о последствиях уже случившейся атаки (кто-то пострадал, скорая везёт
+// в больницу, повреждено оборудование) — важная информация, но НЕ сигнал
+// «сейчас прилетит, займите укрытие»: событие уже произошло, действовать
+// прямо сейчас читателю не нужно. Раньше срабатывала полная тревога (звук,
+// вибрация, красный статус) просто из-за слова «беспилотник»/«атак».
+const CASUALTY_NEWS_RE = /(пострадал\w*[^.!?\n]{0,25}в результате атак|пострадал\w*\s+(мужчина|женщина|человек|подросток|ребен\w*|ребён\w*)|получил\w* осколочн\w* ранени|доставля\w+[^.!?\n]{0,20}в (област\w*|город\w*|районн\w*)?\s*(клиническ\w*)?\s*больниц|бригада скорой|доставили в[^.!?\n]{0,25}(црб|больниц)|на месте атаки повреждены|мирн\w+ жител\w+ пострадал)/i;
+
 function classify(text) {
   const lower = text.toLowerCase();
   if (NEWS_RECAP_RE.test(lower)) return { t: 'other', i: '📰', tag: 'Новостная сводка' };
   if (RESOLVED_STORY_RE.test(lower)) return { t: 'other', i: '📰', tag: 'История без действия' };
   if (APPEAL_RANT_RE.test(lower)) return { t: 'other', i: '📰', tag: 'Обращение' };
+  if (CASUALTY_NEWS_RE.test(lower)) return { t: 'other', i: '📰', tag: 'Сводка о последствиях' };
 
   if (/отбой/.test(lower)) return { t: 'cancel', i: '✅', tag: 'Отбой / отмена' };
 
@@ -1178,8 +1186,24 @@ function jaccardSimilarity(a, b) {
   const union = a.size + b.size - inter;
   return union === 0 ? 0 : inter / union;
 }
+// Короткое повторное сообщение ("❗ РАКЕТНАЯ ОПАСНОСТЬ в Шебекинском МО!") почти
+// целиком состоит из слов, уже присутствующих в более подробном сообщении об
+// этом же событии, отправленном минутой раньше ("...МО 12:49. Спуститесь в
+// подвальное..."). Jaccard в такой паре часто чуть-чуть не дотягивает до порога
+// (у длинного сообщения много своих доп. слов, раздувающих объединение) — берём
+// ещё и коэффициент вложенности: если почти все слова короткого сообщения есть
+// в длинном, это тот же сигнал, просто пересказанный короче.
+function containmentRatio(a, b) {
+  const minSize = Math.min(a.size, b.size);
+  if (minSize === 0) return 0;
+  let inter = 0;
+  a.forEach((w) => { if (b.has(w)) inter++; });
+  return inter / minSize;
+}
+
 const DEDUPE_WINDOW_MS = 15 * 60 * 1000; // сообщения из разных каналов об одном и том же обычно приходят почти одновременно
 const DEDUPE_SIMILARITY = 0.55;
+const DEDUPE_CONTAINMENT = 0.8;
 
 function dedupeItems(items) {
   const sorted = items.slice().sort((a, b) => a.ts - b.ts); // старые первыми — канонический экземпляр стабилен между опросами
@@ -1190,7 +1214,8 @@ function dedupeItems(items) {
     for (const r of result) {
       if (r.t !== it.t || r.region !== it.region) continue;
       if (Math.abs(r.ts - it.ts) > DEDUPE_WINDOW_MS) continue;
-      if (jaccardSimilarity(itWords, wordSet(r.txt)) >= DEDUPE_SIMILARITY) { dup = r; break; }
+      const rWords = wordSet(r.txt);
+      if (jaccardSimilarity(itWords, rWords) >= DEDUPE_SIMILARITY || containmentRatio(itWords, rWords) >= DEDUPE_CONTAINMENT) { dup = r; break; }
     }
     if (dup) {
       if (it.source && dup.sources.indexOf(it.source) === -1) dup.sources.push(it.source);
