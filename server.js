@@ -905,7 +905,8 @@ const REGION_NAMES = {
 // оповещение целиком, см. ниже).
 const AD_PATTERNS = [
   /реклам/i, /promo/i, /подпис\w+ на канал/i, /erid/i, /18\+.*реклама/i,
-  /по вопросам сотрудничества/i
+  /по вопросам сотрудничества/i, /скидк\w+\s*\d/i, /промокод\w*/i,
+  /партнёрск\w*\s*(материал|пост|публикаци)/i, /спонсор(ск\w*)?\s*(пост|материал)/i
 ];
 
 // Ссылки внутри иначе нормального сообщения (например «РАКЕТНАЯ ОПАСНОСТЬ» текстом,
@@ -932,6 +933,23 @@ function stripLinks(text) {
     .map((line) => line.replace(URL_RE, '').trim())
     .map((line) => line.replace(TRAILING_CTA_RE, '').trim())
     .filter((line) => line.length > 0 && !LINK_STUB_RE.test(line) && !lineMentionsMax(line) && /[a-zA-Zа-яА-ЯёЁ]/.test(line))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// Рекламные вставки внутри иначе нормального сообщения, которые НЕ содержат
+// ссылку (иначе их поймал бы stripLinks) — например отдельная строка вида
+// «Скидка 20% в нашем магазине, промокод БПЛА20» под настоящим оповещением,
+// или служебные пометки #реклама/erid без остального текста рекламы.
+// Вырезаем построчно, само оповещение остаётся.
+const AD_LINE_RE = /(^|[\s#])(реклама|ad|erid:\S+)(\s|$)/i;
+const PROMO_LINE_RE = /(скидк\w*\s*\d|промокод\w*|только\s+сегодня\s+акци|успей\w*\s+(купить|заказать|оформить)|закажи(те)?\s+(сейчас|сегодня)|партнёрск\w*\s*(материал|пост|публикаци)|спонсор(ск\w*)?\s*(пост|материал)|наш\s+магазин|переходи(те)?\s+в\s+наш\s+чат)/i;
+
+function stripAdLines(text) {
+  return text
+    .split('\n')
+    .filter((line) => !AD_LINE_RE.test(line) && !PROMO_LINE_RE.test(line))
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -1121,7 +1139,7 @@ async function fetchChannelMessages(channel) {
   const url = `https://t.me/s/${channel}`;
   const res = await axios.get(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TrevogaBelgorodBot/1.0)' },
-    timeout: 10000
+    timeout: 15000
   });
   const $ = cheerio.load(res.data);
   const messages = [];
@@ -1148,18 +1166,30 @@ async function fetchChannelMessages(channel) {
   return messages;
 }
 
+// Настоящие тревоги (не новости) держим короткими — их читают за секунду,
+// принимая решение «в укрытие или нет». Новостные посты (сводки, истории,
+// обращения — всё, что classify() относит к типу 'other') показываем целиком:
+// это уже не сигнал действовать прямо сейчас, а материал для чтения, и
+// обрезка на середине предложения там только мешает. NEWS_SAFETY_CAP —
+// просто защита от аномально гигантского поста (не обычный случай), а не
+// обычная граница отображения.
+const ALERT_TEXT_LIMIT = 400;
+const NEWS_SAFETY_CAP = 4000;
+
 function formatFeedItem(msg) {
-  const cleanText = stripCustomWords(stripLinks(msg.text));
+  const cleanText = stripAdLines(stripCustomWords(stripLinks(msg.text)));
   const cls = classify(cleanText);
+  const isNews = cls.t === 'other';
   const region = channelRegionOverride[msg.channel] || detectRegion(cleanText);
   const hasRealTime = !!msg.datetime;
   const dt = hasRealTime ? new Date(msg.datetime) : new Date();
   const time = dt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
   const date = dt.toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', timeZone: 'Europe/Moscow' });
+  const limit = isNews ? NEWS_SAFETY_CAP : ALERT_TEXT_LIMIT;
   return {
     id: msg.id,
     t: cls.t, i: cls.i, tag: cls.tag,
-    txt: cleanText.length > 400 ? cleanText.slice(0, 400) + '…' : cleanText,
+    txt: cleanText.length > limit ? cleanText.slice(0, limit) + '…' : cleanText,
     time, date, region,
     isNew: false,
     ts: dt.getTime(),
@@ -1258,12 +1288,14 @@ let bootGraceActive = true;
 async function pollOnce() {
   try {
     let raw = [];
+    const failedChannels = new Set();
     for (const channel of channels) {
       try {
         const msgs = await fetchChannelMessages(channel);
         raw = raw.concat(msgs);
         channelHealth[channel] = { ok: true, lastPollAt: Date.now(), lastError: null, count: msgs.length };
       } catch (err) {
+        failedChannels.add(channel);
         channelHealth[channel] = { ok: false, lastPollAt: Date.now(), lastError: err.message, count: 0 };
         addLog('error', `Ошибка опроса канала @${channel}: ${err.message}`);
       }
@@ -1310,8 +1342,21 @@ async function pollOnce() {
       .sort((a, b) => b.ts - a.ts)
       .slice(0, 60); // храним последние 60 сообщений
     // seenIds строим по ВСЕМ сообщениям канала (включая нерелевантные),
-    // чтобы off-topic посты не пересчитывались и не «просачивались» после правок фильтра
-    state.seenIds = allItems.slice(0, 200).map((it) => String(it.id));
+    // чтобы off-topic посты не пересчитывались и не «просачивались» после правок фильтра.
+    // ВАЖНО: если какой-то канал в этом цикле не опросился (таймаут/ошибка сети —
+    // см. failedChannels выше), его сообщений нет в allItems, и полная перезапись
+    // seenIds стёрла бы память о том, что его посты уже видели. Тогда при следующем
+    // удачном опросе этот канал присылает СТАРЫЕ (уже показанные и разосланные)
+    // сообщения как будто они новые — та самая повторная рассылка после сбоя.
+    // Поэтому id-шники упавших каналов переносим из предыдущего state.seenIds как есть
+    // (у всех id префикс "канал/...", см. fetchChannelMessages), остальные — обновляем.
+    const freshSeenIds = allItems.slice(0, 200).map((it) => String(it.id));
+    const preservedSeenIds = failedChannels.size
+      ? (state.seenIds || []).filter((id) =>
+          Array.from(failedChannels).some((ch) => id.startsWith(ch + '/'))
+        )
+      : [];
+    state.seenIds = Array.from(new Set([...freshSeenIds, ...preservedSeenIds])).slice(0, 400);
     // deletedIds храним по тому же принципу, что и seenIds — не бесконечно,
     // достаточно последних записей, чтобы удалённое сегодня не вернулось.
     if (Array.isArray(state.deletedIds) && state.deletedIds.length > 500) {
