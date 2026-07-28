@@ -125,6 +125,17 @@
   .quick-btn.danger { border-color: rgba(239,68,68,0.3); color: var(--accent); }
   .quick-btn.safe { border-color: rgba(34,197,94,0.3); color: var(--green); }
 
+  /* Сетка 3 в ряд для кнопок по районам (РО/БПЛА/Отбой) — как клавиатура выбора
+     знака зодиака в Telegram-боте: одинаковые по размеру плашки, иконка + короткая
+     подпись, без переноса текста в произвольном месте. */
+  .quick-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 16px; }
+  @media (max-width: 520px) { .quick-grid { grid-template-columns: repeat(2, 1fr); } }
+  .quick-grid .quick-btn {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 12px 8px; text-align: center; white-space: normal;
+  }
+  .quick-grid .quick-btn.wide { grid-column: 1 / -1; }
+
   .toast-wrap { position: fixed; top: 16px; right: 16px; left: 16px; z-index: 999; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
   .toast { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 12px 16px; font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); max-width: 300px; overflow-wrap: break-word; }
   .toast.err { border-color: rgba(239,68,68,0.4); color: var(--accent); }
@@ -273,46 +284,46 @@
 
     <div class="panel">
       <h2>⚡ Быстрая ракетная опасность</h2>
-      <div class="quick-actions">
-        <button class="quick-btn danger" data-quick-alert="rocket:all" type="button">🚀 РО — по всей области</button>
-        <button class="quick-btn danger" data-quick-alert="rocket:belgorod" type="button">🚀 РО — Белгород</button>
-        <button class="quick-btn danger" data-quick-alert="rocket:valuiki" type="button">🚀 РО — Валуйки</button>
-        <button class="quick-btn danger" data-quick-alert="rocket:shebekino" type="button">🚀 РО — Шебекино</button>
-        <button class="quick-btn danger" data-quick-alert="rocket:graivoron" type="button">🚀 РО — Грайворон</button>
-        <button class="quick-btn danger" data-quick-alert="rocket:stary-oskol" type="button">🚀 РО — Старый Оскол</button>
-        <button class="quick-btn danger" data-quick-alert="rocket:gubkin" type="button">🚀 РО — Губкин</button>
-        <button class="quick-btn danger" data-quick-alert="rocket:korocha" type="button">🚀 РО — Короча</button>
-        <button class="quick-btn danger" data-quick-alert="rocket:krasnaya-yaruga" type="button">🚀 РО — Красная Яруга</button>
+      <div class="quick-actions quick-grid">
+        <button class="quick-btn danger wide" data-quick-alert="rocket:all" type="button">🚀 Вся область</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:belgorod" type="button">🚀 Белгород</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:valuiki" type="button">🚀 Валуйки</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:shebekino" type="button">🚀 Шебекино</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:graivoron" type="button">🚀 Грайворон</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:stary-oskol" type="button">🚀 Старый Оскол</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:gubkin" type="button">🚀 Губкин</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:korocha" type="button">🚀 Короча</button>
+        <button class="quick-btn danger" data-quick-alert="rocket:krasnaya-yaruga" type="button">🚀 Красная Яруга</button>
       </div>
     </div>
 
     <div class="panel">
       <h2>⚡ Быстрый БПЛА</h2>
-      <div class="quick-actions">
-        <button class="quick-btn danger" data-quick-alert="drone:all" type="button">🛸 БПЛА — по всей области</button>
-        <button class="quick-btn danger" data-quick-alert="drone:belgorod" type="button">🛸 БПЛА — Белгород</button>
-        <button class="quick-btn danger" data-quick-alert="drone:valuiki" type="button">🛸 БПЛА — Валуйки</button>
-        <button class="quick-btn danger" data-quick-alert="drone:shebekino" type="button">🛸 БПЛА — Шебекино</button>
-        <button class="quick-btn danger" data-quick-alert="drone:graivoron" type="button">🛸 БПЛА — Грайворон</button>
-        <button class="quick-btn danger" data-quick-alert="drone:stary-oskol" type="button">🛸 БПЛА — Старый Оскол</button>
-        <button class="quick-btn danger" data-quick-alert="drone:gubkin" type="button">🛸 БПЛА — Губкин</button>
-        <button class="quick-btn danger" data-quick-alert="drone:korocha" type="button">🛸 БПЛА — Короча</button>
-        <button class="quick-btn danger" data-quick-alert="drone:krasnaya-yaruga" type="button">🛸 БПЛА — Красная Яруга</button>
+      <div class="quick-actions quick-grid">
+        <button class="quick-btn danger wide" data-quick-alert="drone:all" type="button">🛸 Вся область</button>
+        <button class="quick-btn danger" data-quick-alert="drone:belgorod" type="button">🛸 Белгород</button>
+        <button class="quick-btn danger" data-quick-alert="drone:valuiki" type="button">🛸 Валуйки</button>
+        <button class="quick-btn danger" data-quick-alert="drone:shebekino" type="button">🛸 Шебекино</button>
+        <button class="quick-btn danger" data-quick-alert="drone:graivoron" type="button">🛸 Грайворон</button>
+        <button class="quick-btn danger" data-quick-alert="drone:stary-oskol" type="button">🛸 Старый Оскол</button>
+        <button class="quick-btn danger" data-quick-alert="drone:gubkin" type="button">🛸 Губкин</button>
+        <button class="quick-btn danger" data-quick-alert="drone:korocha" type="button">🛸 Короча</button>
+        <button class="quick-btn danger" data-quick-alert="drone:krasnaya-yaruga" type="button">🛸 Красная Яруга</button>
       </div>
     </div>
 
     <div class="panel">
       <h2>⚡ Быстрый отбой</h2>
-      <div class="quick-actions">
-        <button class="quick-btn safe" data-cancel-region="all" type="button">✅ Отбой по всей области</button>
-        <button class="quick-btn safe" data-cancel-region="belgorod" type="button">✅ Отбой — Белгород</button>
-        <button class="quick-btn safe" data-cancel-region="valuiki" type="button">✅ Отбой — Валуйки</button>
-        <button class="quick-btn safe" data-cancel-region="shebekino" type="button">✅ Отбой — Шебекино</button>
-        <button class="quick-btn safe" data-cancel-region="graivoron" type="button">✅ Отбой — Грайворон</button>
-        <button class="quick-btn safe" data-cancel-region="stary-oskol" type="button">✅ Отбой — Старый Оскол</button>
-        <button class="quick-btn safe" data-cancel-region="gubkin" type="button">✅ Отбой — Губкин</button>
-        <button class="quick-btn safe" data-cancel-region="korocha" type="button">✅ Отбой — Короча</button>
-        <button class="quick-btn safe" data-cancel-region="krasnaya-yaruga" type="button">✅ Отбой — Красная Яруга</button>
+      <div class="quick-actions quick-grid">
+        <button class="quick-btn safe wide" data-cancel-region="all" type="button">✅ Вся область</button>
+        <button class="quick-btn safe" data-cancel-region="belgorod" type="button">✅ Белгород</button>
+        <button class="quick-btn safe" data-cancel-region="valuiki" type="button">✅ Валуйки</button>
+        <button class="quick-btn safe" data-cancel-region="shebekino" type="button">✅ Шебекино</button>
+        <button class="quick-btn safe" data-cancel-region="graivoron" type="button">✅ Грайворон</button>
+        <button class="quick-btn safe" data-cancel-region="stary-oskol" type="button">✅ Старый Оскол</button>
+        <button class="quick-btn safe" data-cancel-region="gubkin" type="button">✅ Губкин</button>
+        <button class="quick-btn safe" data-cancel-region="korocha" type="button">✅ Короча</button>
+        <button class="quick-btn safe" data-cancel-region="krasnaya-yaruga" type="button">✅ Красная Яруга</button>
       </div>
     </div>
   </div>
