@@ -13,11 +13,11 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const cheerio = require('cheerio');
 const webpush = require('web-push');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { fetchAllChannels } = require('./channel-fetcher');
 
 // ===== Внешний бэкап данных (Upstash Redis REST) — переживает перезапуск хостинга =====
 // НАЙДЕННАЯ ПРИЧИНА, почему каналы-источники и подписки слетали после
@@ -384,6 +384,14 @@ async function tgCall(method, params, timeoutMs) {
     if (method === 'getUpdates' && (err.code === 'ECONNABORTED' || /timeout/i.test(err.message))) {
       return { ok: true, result: [] };
     }
+    // editMessageText с текстом и клавиатурой, совпадающими с уже показанными —
+    // например, пользователь дважды тапнул одну и ту же кнопку меню, или нажал
+    // кнопку раздела, который и так уже открыт. Telegram в этом случае отвечает
+    // ошибкой, хотя по сути ничего плохого не произошло — не настоящий сбой,
+    // логировать и всплывать как ошибку не нужно.
+    if (method === 'editMessageText' && /message is not modified/i.test(err.response?.data?.description || '')) {
+      return err.response.data;
+    }
     addLog('error', `Telegram API ошибка (${method}): ` + (err.response?.data?.description || err.message));
     // Telegram отвечает конкретным телом с ok:false/error_code (403 — бот
     // заблокирован, 429 — превышен лимит запросов и т.п.) — раньше это тело
@@ -473,17 +481,72 @@ function buildAdminStatsText() {
   return lines.join('\n');
 }
 
-function mainMenuKeyboard() {
+// Главное меню теперь — постоянная клавиатура под полем ввода (Reply Keyboard),
+// а не inline-кнопки внутри одного редактируемого сообщения. Она не привязана
+// к конкретному сообщению и не может "устареть" или потеряться при прокрутке
+// чата — Telegram держит её прикреплённой к чату, пока не пришлют remove_keyboard.
+// Разделы с точечными действиями (источники, логи, лента, настройки) по-прежнему
+// используют inline-кнопки — там нужен выбор конкретного пункта (удалить канал,
+// фильтр логов и т.п.), просто открываются они теперь новым сообщением по тапу
+// на постоянную кнопку, а не редактированием одного "главного" сообщения.
+const MENU_ALERT = '⚡ Быстрая тревога';
+const MENU_STATS = '📊 Статистика';
+const MENU_LOGS = '🧾 Логи';
+const MENU_CHANNELS = '📡 Каналы-источники';
+const MENU_ALARMCFG = '⚙️ Настройки тревоги';
+const MENU_FEED = '🗂 Текущая лента';
+const MENU_LOGOUT = '🚪 Выйти из админки';
+
+function mainReplyKeyboard() {
   return {
-    inline_keyboard: [
-      [{ text: '⚡ Быстрая тревога', callback_data: 'tga:menu:alert' }],
-      [{ text: '📊 Статистика', callback_data: 'tga:menu:stats' }, { text: '🧾 Логи', callback_data: 'tga:menu:logs' }],
-      [{ text: '📡 Каналы-источники', callback_data: 'tga:menu:channels' }],
-      [{ text: '⚙️ Настройки тревоги', callback_data: 'tga:menu:alarmcfg' }],
-      [{ text: '🗂 Текущая лента', callback_data: 'tga:menu:feed' }],
-      [{ text: '🚪 Выйти из админки', callback_data: 'tga:menu:logout' }]
-    ]
+    keyboard: [
+      [MENU_ALERT],
+      [MENU_STATS, MENU_LOGS],
+      [MENU_CHANNELS, MENU_ALARMCFG],
+      [MENU_FEED],
+      [MENU_LOGOUT]
+    ],
+    resize_keyboard: true,
+    is_persistent: true
   };
+}
+
+// Нажатие на кнопку постоянной клавиатуры приходит боту как обычное текстовое
+// сообщение с текстом кнопки — в отличие от инлайн-кнопок, тут нет "исходного"
+// сообщения, которое можно отредактировать, поэтому для каждого раздела
+// отправляем НОВОЕ сообщение с соответствующим текстом и инлайн-клавиатурой
+// для точечных действий внутри раздела (обновить, отфильтровать, удалить и т.п.).
+// Сама постоянная клавиатура при этом никуда не девается — Telegram держит её
+// прикреплённой к чату независимо от того, что происходит в сообщениях выше.
+async function sendAdminSection(chatId, label) {
+  if (label === MENU_ALERT) {
+    await tgCall('sendMessage', { chat_id: chatId, text: '⚡ Что отправить?', reply_markup: alertTypeKeyboard() });
+  } else if (label === MENU_STATS) {
+    await tgCall('sendMessage', {
+      chat_id: chatId, text: buildAdminStatsText(), parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: '↻ Обновить', callback_data: 'tga:menu:stats' }]] }
+    });
+  } else if (label === MENU_LOGS) {
+    await tgCall('sendMessage', { chat_id: chatId, text: buildLogsText(''), parse_mode: 'Markdown', reply_markup: logsKeyboard('') });
+  } else if (label === MENU_CHANNELS) {
+    await tgCall('sendMessage', { chat_id: chatId, text: buildChannelsText(), parse_mode: 'Markdown', reply_markup: channelsKeyboard() });
+  } else if (label === MENU_ALARMCFG) {
+    await tgCall('sendMessage', {
+      chat_id: chatId, text: '⚙️ *Настройки тревоги*\n\nЧто из этого триггерит громкий звук/вибрацию у пользователей на сайте:',
+      parse_mode: 'Markdown', reply_markup: alarmCfgKeyboard()
+    });
+  } else if (label === MENU_FEED) {
+    await tgCall('sendMessage', { chat_id: chatId, text: buildFeedText(), parse_mode: 'Markdown', reply_markup: feedKeyboard(chatId) });
+  } else if (label === MENU_LOGOUT) {
+    tgAdmins = tgAdmins.filter((id) => id !== chatId);
+    saveTgAdmins();
+    addLog('info', `Telegram-админ ${chatId} вышел из режима администратора`);
+    await tgCall('sendMessage', {
+      chat_id: chatId,
+      text: '👋 Вы вышли из режима администратора. Чтобы вернуться, попроси администратора сайта выдать доступ заново.',
+      reply_markup: { remove_keyboard: true }
+    });
+  }
 }
 
 function logsKeyboard(filter) {
@@ -492,8 +555,7 @@ function logsKeyboard(filter) {
     inline_keyboard: [
       [{ text: mark('') + 'Все', callback_data: 'tga:logs:' }, { text: mark('error') + 'Ошибки', callback_data: 'tga:logs:error' }],
       [{ text: mark('warn') + 'Предупреждения', callback_data: 'tga:logs:warn' }, { text: mark('info') + 'Инфо', callback_data: 'tga:logs:info' }],
-      [{ text: '↻ Обновить', callback_data: 'tga:logs:' + filter }],
-      [{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]
+      [{ text: '↻ Обновить', callback_data: 'tga:logs:' + filter }]
     ]
   };
 }
@@ -517,7 +579,6 @@ function channelsKeyboard() {
     return [{ text: `${icon} @${c}`, callback_data: 'tga:noop' }, { text: '🗑 удалить', callback_data: 'tga:chan:del:' + c }];
   });
   rows.push([{ text: '➕ Добавить канал', callback_data: 'tga:chan:add' }]);
-  rows.push([{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]);
   return { inline_keyboard: rows };
 }
 
@@ -537,8 +598,7 @@ function alarmCfgKeyboard() {
     inline_keyboard: [
       [{ text: `${on(alarmConfig.enabled)} Тревога включена`, callback_data: 'tga:cfg:enabled' }],
       [{ text: `${on(alarmConfig.types.includes('rocket'))} 🚀 Ракетная опасность`, callback_data: 'tga:cfg:type:rocket' }],
-      [{ text: `${on(alarmConfig.types.includes('drone'))} 🛸 БПЛА`, callback_data: 'tga:cfg:type:drone' }],
-      [{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]
+      [{ text: `${on(alarmConfig.types.includes('drone'))} 🛸 БПЛА`, callback_data: 'tga:cfg:type:drone' }]
     ]
   };
 }
@@ -550,7 +610,7 @@ function feedKeyboard(chatId) {
     { text: `${it.i} ${it.time} ${it.tag}`.slice(0, 60), callback_data: 'tga:noop' },
     { text: '🗑', callback_data: 'tga:feed:del:' + i }
   ]);
-  rows.push([{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]);
+  if (!rows.length) rows.push([{ text: '↻ Обновить', callback_data: 'tga:menu:feed' }]);
   return { inline_keyboard: rows };
 }
 
@@ -611,12 +671,10 @@ async function tgHandleUpdate(update) {
         if (parts[1] === 'menu') {
           const section = parts[2];
           await tgCall('answerCallbackQuery', { callback_query_id: cq.id });
-          if (section === 'main') {
-            await edit('🛠 *Админ-меню*\n\nВыбери раздел:', mainMenuKeyboard());
-          } else if (section === 'alert') {
+          if (section === 'alert') {
             await edit('⚡ Что отправить?', alertTypeKeyboard());
           } else if (section === 'stats') {
-            await edit(buildAdminStatsText(), { inline_keyboard: [[{ text: '↻ Обновить', callback_data: 'tga:menu:stats' }], [{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]] });
+            await edit(buildAdminStatsText(), { inline_keyboard: [[{ text: '↻ Обновить', callback_data: 'tga:menu:stats' }]] });
           } else if (section === 'logs') {
             await edit(buildLogsText(''), logsKeyboard(''));
           } else if (section === 'channels') {
@@ -625,10 +683,6 @@ async function tgHandleUpdate(update) {
             await edit('⚙️ *Настройки тревоги*\n\nЧто из этого триггерит громкий звук/вибрацию у пользователей на сайте:', alarmCfgKeyboard());
           } else if (section === 'feed') {
             await edit(buildFeedText(), feedKeyboard(chatId));
-          } else if (section === 'logout') {
-            tgAdmins = tgAdmins.filter((id) => id !== chatId);
-            saveTgAdmins();
-            await tgCall('editMessageText', { chat_id: chatId, message_id: mid, text: '👋 Вы вышли из режима администратора. /admin <пароль> — войти снова.' });
           }
           return;
         }
@@ -644,7 +698,7 @@ async function tgHandleUpdate(update) {
             const item = type === 'cancel' ? await publishCancel(region, null) : await publishQuickAlert(type, region, null);
             const regionLabel = region === 'all' ? 'по всей области' : (REGION_NAMES[region] || region);
             await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Отправлено' });
-            await edit(`✅ Отправлено в ленту и всем подписчикам:\n\n${item.i} *${item.tag}* — ${regionLabel}\n${escMd(item.txt)}`, { inline_keyboard: [[{ text: '⬅️ Меню', callback_data: 'tga:menu:main' }]] });
+            await edit(`✅ Отправлено в ленту и всем подписчикам:\n\n${item.i} *${item.tag}* — ${regionLabel}\n${escMd(item.txt)}`);
             addLog('info', `Telegram-админ ${chatId} опубликовал: ${item.tag} (${region})`);
           } catch (err) {
             await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: 'Ошибка: ' + err.message, show_alert: true });
@@ -749,7 +803,7 @@ async function tgHandleUpdate(update) {
       saveTgSubs();
       if (idx < 0) addLog('info', 'Telegram: новый подписчик ' + chatId);
       if (isTgAdmin(chatId)) {
-        await tgCall('sendMessage', { chat_id: chatId, text: '🛠 *Админ-меню*\n\nВыбери раздел:', parse_mode: 'Markdown', reply_markup: mainMenuKeyboard() });
+        await tgCall('sendMessage', { chat_id: chatId, text: '🛠 *Админ-меню*\n\nВыбери раздел на клавиатуре внизу.', parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() });
       } else {
         await tgCall('sendMessage', {
           chat_id: chatId,
@@ -777,11 +831,15 @@ async function tgHandleUpdate(update) {
       });
     } else if (text === '/menu' || text === '/stats' || text === '/alert') {
       if (!isTgAdmin(chatId)) { await tgCall('sendMessage', { chat_id: chatId, text: 'Доступ только для админов. Доступ выдаёт администратор сайта — набери /admin, чтобы узнать свой chat ID.' }); return; }
-      await tgCall('sendMessage', { chat_id: chatId, text: '🛠 *Админ-меню*\n\nВыбери раздел:', parse_mode: 'Markdown', reply_markup: mainMenuKeyboard() });
+      await tgCall('sendMessage', { chat_id: chatId, text: '🛠 *Админ-меню*\n\nВыбери раздел на клавиатуре внизу.', parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() });
     } else if (text === '/adminlogout') {
       tgAdmins = tgAdmins.filter((id) => id !== chatId);
       saveTgAdmins();
-      await tgCall('sendMessage', { chat_id: chatId, text: '👋 Вышли из режима администратора. Чтобы вернуться, попроси администратора сайта выдать доступ заново.' });
+      await tgCall('sendMessage', { chat_id: chatId, text: '👋 Вышли из режима администратора. Чтобы вернуться, попроси администратора сайта выдать доступ заново.', reply_markup: { remove_keyboard: true } });
+    } else if (isTgAdmin(chatId) && [MENU_ALERT, MENU_STATS, MENU_LOGS, MENU_CHANNELS, MENU_ALARMCFG, MENU_FEED, MENU_LOGOUT].includes(text)) {
+      // Нажатие на кнопку постоянной клавиатуры — Telegram присылает его как
+      // обычное текстовое сообщение с текстом кнопки.
+      await sendAdminSection(chatId, text);
     } else {
       const base = 'Команды: /start — подписаться, /region — выбрать район, /stop — отписаться.';
       const adminHint = isTgAdmin(chatId) ? '\n\nАдмин: /menu — открыть меню управления.' : '\n\nДоступ администратора выдаётся с сайта. /admin — узнать свой chat ID для этого.';
@@ -1135,36 +1193,9 @@ function recordVisit(req) {
 }
 
 // ===== Парсер публичной веб-версии Telegram (t.me/s/<channel>) =====
-async function fetchChannelMessages(channel) {
-  const url = `https://t.me/s/${channel}`;
-  const res = await axios.get(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TrevogaBelgorodBot/1.0)' },
-    timeout: 15000
-  });
-  const $ = cheerio.load(res.data);
-  const messages = [];
-
-  $('.tgme_widget_message').each((_, el) => {
-    const $el = $(el);
-    const idAttr = $el.attr('data-post') || '';
-    const textEl = $el.find('.tgme_widget_message_text').first();
-    if (!textEl.length) return; // сообщение без текста (только медиа) — пропускаем
-
-    // Заменяем <br> на переносы перед извлечением текста
-    textEl.find('br').replaceWith('\n');
-    const text = textEl.text().trim();
-    if (!text) return;
-
-    const timeEl = $el.find('.tgme_widget_message_date time').first();
-    const datetime = timeEl.attr('datetime') || null;
-    // id включает имя канала, чтобы сообщения разных каналов никогда не пересекались
-    const id = (idAttr || (channel + '/' + (datetime || text.slice(0, 40))));
-
-    messages.push({ id, text, datetime, channel });
-  });
-
-  return messages;
-}
+// fetchChannelMessages() перенесена в отдельный файл channel-fetcher.js —
+// см. подробное объяснение почему там (параллельный опрос вместо
+// последовательного, без задержки для быстрых каналов из-за медленных).
 
 // Настоящие тревоги (не новости) держим короткими — их читают за секунду,
 // принимая решение «в укрытие или нет». Новостные посты (сводки, истории,
@@ -1234,6 +1265,16 @@ function containmentRatio(a, b) {
 const DEDUPE_WINDOW_MS = 15 * 60 * 1000; // сообщения из разных каналов об одном и том же обычно приходят почти одновременно
 const DEDUPE_SIMILARITY = 0.55;
 const DEDUPE_CONTAINMENT = 0.8;
+// Доп. защита: если два сообщения пришли почти одновременно (в пределах
+// минуты) и текстуально почти совпадают, считаем их дублем ДАЖЕ если
+// классификатор ошибочно присвоил им разный тип/район (например, одно и то
+// же событие один канал прислал как «уведомление», другой — как «БПЛА»,
+// а третий — с районом, не совпадающим с автоопределённым). Порог схожести
+// тут строже, чем для «основного» дедупа выше, именно потому что тип/район
+// не обязаны совпадать — не хотим случайно съесть два РАЗНЫХ реальных сигнала.
+const SHORT_DEDUPE_WINDOW_MS = 60 * 1000;
+const SHORT_DEDUPE_SIMILARITY = 0.75;
+const SHORT_DEDUPE_CONTAINMENT = 0.9;
 
 function dedupeItems(items) {
   const sorted = items.slice().sort((a, b) => a.ts - b.ts); // старые первыми — канонический экземпляр стабилен между опросами
@@ -1242,10 +1283,19 @@ function dedupeItems(items) {
     const itWords = wordSet(it.txt);
     let dup = null;
     for (const r of result) {
-      if (r.t !== it.t || r.region !== it.region) continue;
-      if (Math.abs(r.ts - it.ts) > DEDUPE_WINDOW_MS) continue;
+      const dt = Math.abs(r.ts - it.ts);
+      const sameBucket = r.t === it.t && r.region === it.region;
+      // Вне "своего" типа/района сравниваем, только если оба сообщения
+      // попали в короткое окно — иначе просто пропускаем пару.
+      if (sameBucket && dt > DEDUPE_WINDOW_MS) continue;
+      if (!sameBucket && dt > SHORT_DEDUPE_WINDOW_MS) continue;
       const rWords = wordSet(r.txt);
-      if (jaccardSimilarity(itWords, rWords) >= DEDUPE_SIMILARITY || containmentRatio(itWords, rWords) >= DEDUPE_CONTAINMENT) { dup = r; break; }
+      const sim = jaccardSimilarity(itWords, rWords);
+      const cont = containmentRatio(itWords, rWords);
+      const isDup = sameBucket
+        ? (sim >= DEDUPE_SIMILARITY || cont >= DEDUPE_CONTAINMENT)
+        : (sim >= SHORT_DEDUPE_SIMILARITY || cont >= SHORT_DEDUPE_CONTAINMENT);
+      if (isDup) { dup = r; break; }
     }
     if (dup) {
       if (it.source && dup.sources.indexOf(it.source) === -1) dup.sources.push(it.source);
@@ -1287,17 +1337,20 @@ let bootGraceActive = true;
 
 async function pollOnce() {
   try {
+    // Параллельный опрос всех каналов (см. channel-fetcher.js) — время
+    // цикла ограничено самым медленным ОДНИМ каналом, а не суммой по всем.
+    // Успешно спарсенные сообщения не ждут упавшие/зависшие каналы.
+    const results = await fetchAllChannels(channels);
     let raw = [];
     const failedChannels = new Set();
-    for (const channel of channels) {
-      try {
-        const msgs = await fetchChannelMessages(channel);
-        raw = raw.concat(msgs);
-        channelHealth[channel] = { ok: true, lastPollAt: Date.now(), lastError: null, count: msgs.length };
-      } catch (err) {
-        failedChannels.add(channel);
-        channelHealth[channel] = { ok: false, lastPollAt: Date.now(), lastError: err.message, count: 0 };
-        addLog('error', `Ошибка опроса канала @${channel}: ${err.message}`);
+    for (const r of results) {
+      if (r.ok) {
+        raw = raw.concat(r.msgs);
+        channelHealth[r.channel] = { ok: true, lastPollAt: Date.now(), lastError: null, count: r.msgs.length };
+      } else {
+        failedChannels.add(r.channel);
+        channelHealth[r.channel] = { ok: false, lastPollAt: Date.now(), lastError: r.error, count: 0 };
+        addLog('error', `Ошибка опроса канала @${r.channel}: ${r.error}`);
       }
     }
 
