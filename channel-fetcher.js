@@ -25,8 +25,17 @@
 
 const axios = require('axios');
 const cheerio = require('cheerio');
+const { describeError } = require('./error-utils');
 
 const CHANNEL_TIMEOUT_MS = 10000;
+// Небольшой разброс старта запроса на канал — чтобы не долбить t.me
+// буквально всеми каналами в один и тот же миллисекунд (это повышало шанс
+// сетевых сбоев вроде AggregateError при параллельных подключениях к одному
+// хосту). На общее время цикла почти не влияет: максимум (число каналов-1)×
+// STAGGER_STEP_MS добавки к старту последнего канала, а не к длине опроса.
+const STAGGER_STEP_MS = 120;
+
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 // Разбор одной публичной веб-страницы канала (t.me/s/канал) в список
 // сообщений. Логика разбора не менялась — просто перенесена сюда как есть.
@@ -66,13 +75,15 @@ async function fetchChannelMessages(channel) {
 // с успехами и ошибками, не дожидаясь друг друга.
 // Возвращает: [{ channel, ok, msgs, error }, ...] — в том же порядке, что и channels.
 async function fetchAllChannels(channels) {
-  const settled = await Promise.allSettled(channels.map((ch) => fetchChannelMessages(ch)));
+  const settled = await Promise.allSettled(
+    channels.map((ch, i) => sleep(i * STAGGER_STEP_MS).then(() => fetchChannelMessages(ch)))
+  );
   return channels.map((channel, i) => {
     const r = settled[i];
     if (r.status === 'fulfilled') {
       return { channel, ok: true, msgs: r.value, error: null };
     }
-    return { channel, ok: false, msgs: [], error: (r.reason && r.reason.message) || 'unknown error' };
+    return { channel, ok: false, msgs: [], error: describeError(r.reason) };
   });
 }
 

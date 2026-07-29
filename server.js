@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { fetchAllChannels } = require('./channel-fetcher');
+const { describeError } = require('./error-utils');
 
 // ===== Внешний бэкап данных (Upstash Redis REST) — переживает перезапуск хостинга =====
 // НАЙДЕННАЯ ПРИЧИНА, почему каналы-источники и подписки слетали после
@@ -392,7 +393,7 @@ async function tgCall(method, params, timeoutMs) {
     if (method === 'editMessageText' && /message is not modified/i.test(err.response?.data?.description || '')) {
       return err.response.data;
     }
-    addLog('error', `Telegram API ошибка (${method}): ` + (err.response?.data?.description || err.message));
+    addLog('error', `Telegram API ошибка (${method}): ` + describeError(err));
     // Telegram отвечает конкретным телом с ok:false/error_code (403 — бот
     // заблокирован, 429 — превышен лимит запросов и т.п.) — раньше это тело
     // терялось и вызывающий код получал просто null, из-за чего обработка
