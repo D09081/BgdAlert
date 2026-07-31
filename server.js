@@ -296,6 +296,13 @@ addLog('info', 'Сервер запускается');
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || '';
 const TG_API = TELEGRAM_BOT_TOKEN ? `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}` : null;
+// Группа/канал, куда бот дублирует те же оповещения, что рассылает
+// подписчикам в личку — https://t.me/BgdAlert. Задаётся через переменную
+// окружения (можно сменить без правки кода); значение по умолчанию — сам
+// @BgdAlert. Бота нужно добавить в группу АДМИНИСТРАТОРОМ с правом
+// отправки сообщений, иначе sendMessage будет получать 403/400 — это не
+// баг кода, это права бота в самой группе.
+const TELEGRAM_GROUP_CHAT = process.env.TELEGRAM_GROUP_CHAT || '@BgdAlert';
 const TG_SUBS_FILE = path.join(DATA_DIR, 'telegram-subs.json');
 let tgSubscriptions = loadJson(TG_SUBS_FILE, []); // [{ chatId, regions: ['all'], joinedAt }]
 const TG_ADMINS_FILE = path.join(DATA_DIR, 'telegram-admins.json');
@@ -893,11 +900,30 @@ if (TG_API) {
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 async function notifyTelegramSubscribers(item) {
-  if (!TG_API || !tgSubscriptions.length) return;
+  if (!TG_API) return;
   const isUrgent = isAlarmTriggering(item);
   const regionLabel = item.region === 'all' ? 'по всей области' : (REGION_NAMES[item.region] || item.region);
   const title = isUrgent ? `🚨 *ТРЕВОГА* · ${regionLabel}` : `${item.i} *${item.tag}*`;
   const text = `${title}\n\n${escMd(item.txt)}\n\n_${item.time} · ${item.date}_`;
+
+  // Та же самая рассылка, что уходит подписчикам в личку, дублируется в
+  // группу (см. TELEGRAM_GROUP_CHAT выше) — те же 429/сетевые предосторожности,
+  // что и для личных подписчиков, но без удаления "подписки" при ошибке:
+  // группа не подписка, отсутствие прав у бота там не повод что-то стирать —
+  // просто логируем и пробуем в следующий раз.
+  if (TELEGRAM_GROUP_CHAT) {
+    let groupResult = await tgCall('sendMessage', { chat_id: TELEGRAM_GROUP_CHAT, text, parse_mode: 'Markdown' });
+    if (groupResult && groupResult.ok === false && groupResult.error_code === 429) {
+      const retryAfterSec = (groupResult.parameters && groupResult.parameters.retry_after) || 2;
+      await sleep(retryAfterSec * 1000);
+      groupResult = await tgCall('sendMessage', { chat_id: TELEGRAM_GROUP_CHAT, text, parse_mode: 'Markdown' });
+    }
+    if (groupResult && groupResult.ok === false) {
+      addLog('error', `Не удалось отправить в группу ${TELEGRAM_GROUP_CHAT}: ${groupResult.description || 'неизвестная ошибка'}`);
+    }
+  }
+
+  if (!tgSubscriptions.length) return;
   const stillValid = [];
   for (const entry of tgSubscriptions) {
     const matches = item.region === 'all' || (entry.regions && (entry.regions.includes('all') || entry.regions.includes(item.region)));
@@ -965,7 +991,19 @@ const REGION_NAMES = {
 const AD_PATTERNS = [
   /реклам/i, /promo/i, /подпис\w+ на канал/i, /erid/i, /18\+.*реклама/i,
   /по вопросам сотрудничества/i, /скидк\w+\s*\d/i, /промокод\w*/i,
-  /партнёрск\w*\s*(материал|пост|публикаци)/i, /спонсор(ск\w*)?\s*(пост|материал)/i
+  /партнёрск\w*\s*(материал|пост|публикаци)/i, /спонсор(ск\w*)?\s*(пост|материал)/i,
+  // Сборы на нужды/оборудование, донаты, реквизиты для перевода — не реклама
+  // в привычном смысле, но и не оповещение об угрозе: такие посты каналы
+  // публикуют вперемешку с настоящими тревогами, и без фильтра они попадали
+  // в ленту как обычная новость (см. пример: «Просим не быть равнодушными
+  // и проявить активность в сборе на оборудование. Каждые 50-100-200-500
+  // рублей...»).
+  /сбор\w*\s+(средств\w*\s+)?на\s+(оборудование|дрон\w*|технику|снаряжени\w*|экипировк\w*)/i,
+  /не\s+быть\s+равнодушны/i,
+  /\d+[\-–—]\d+[\-–—]\d+([\-–—]\d+)?\s*рублей/i,
+  /позволя\w+\s+приобрест/i,
+  /реквизит\w*\s+(для\s+)?(перевода|сбора|поддержки)/i,
+  /поддержа\w+\s+(наш\s+)?сбор/i
 ];
 
 // Ссылки внутри иначе нормального сообщения (например «РАКЕТНАЯ ОПАСНОСТЬ» текстом,
@@ -1285,6 +1323,20 @@ function dedupeItems(items) {
     let dup = null;
     for (const r of result) {
       const dt = Math.abs(r.ts - it.ts);
+      // "Отбой" — особый случай: разные каналы формулируют его по-разному
+      // ("Внимание, отбой! По ранее объявленным тревогам." vs "ОТБОЙ
+      // РАКЕТНОЙ ОПАСНОСТИ в Белгородском и Шебекинском МО") настолько
+      // непохоже текстуально, что обычное сравнение по словам их не
+      // склеивает — а для читателя это не разные события, а один и тот же
+      // факт «опасности больше нет». Здесь не может быть двух РАЗНЫХ
+      // самостоятельных "отбоев" в течение нескольких минут (в отличие от
+      // rocket/drone, где два разных сигнала подряд — это два разных
+      // реальных случая, и склеивать их по типу без сравнения текста
+      // опасно), поэтому для cancel сравниваем только тип и время, без
+      // текста и района.
+      if (r.t === 'cancel' && it.t === 'cancel' && dt <= DEDUPE_WINDOW_MS) {
+        dup = r; break;
+      }
       const sameBucket = r.t === it.t && r.region === it.region;
       // Вне "своего" типа/района сравниваем, только если оба сообщения
       // попали в короткое окно — иначе просто пропускаем пару.
@@ -1300,6 +1352,13 @@ function dedupeItems(items) {
     }
     if (dup) {
       if (it.source && dup.sources.indexOf(it.source) === -1) dup.sources.push(it.source);
+      // Из двух формулировок отбоя оставляем более информативную (длиннее
+      // текст обычно означает, что указан конкретный район/повод, а не
+      // просто общее "Внимание, отбой!") — иначе в ленте могла бы остаться
+      // менее полезная короткая версия только потому, что пришла первой.
+      if (dup.t === 'cancel' && it.txt.length > dup.txt.length) {
+        dup.txt = it.txt;
+      }
     } else {
       result.push(it);
     }
