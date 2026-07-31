@@ -899,6 +899,19 @@ if (TG_API) {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+// Telegram жёстко режет частую отправку СООБЩЕНИЙ В ОДИН И ТОТ ЖЕ чат —
+// в отличие от рассылки подписчикам (там каждое сообщение уходит в РАЗНЫЙ
+// chat_id, и общий лимит бота ~30/сек с паузой 40мс между подписчиками
+// этого достаточно), группа @BgdAlert — один и тот же получатель на каждый
+// новый пункт ленты. Если в одном цикле опроса приходит пачка сообщений
+// разом (см. "Новых сообщений в ленте: N" в логах), группа получала бы
+// по одному сообщению почти без паузы — именно это разгоняет 429 с растущим
+// retry_after (Telegram увеличивает штраф за повторные нарушения). Поэтому
+// перед каждой отправкой в группу выдерживаем минимальный интервал от
+// предыдущей — не важно, из какого вызова notifyTelegramSubscribers он был.
+let lastGroupSendAt = 0;
+const GROUP_MIN_INTERVAL_MS = 1500;
+
 async function notifyTelegramSubscribers(item) {
   if (!TG_API) return;
   const isUrgent = isAlarmTriggering(item);
@@ -912,10 +925,14 @@ async function notifyTelegramSubscribers(item) {
   // группа не подписка, отсутствие прав у бота там не повод что-то стирать —
   // просто логируем и пробуем в следующий раз.
   if (TELEGRAM_GROUP_CHAT) {
+    const waitMs = GROUP_MIN_INTERVAL_MS - (Date.now() - lastGroupSendAt);
+    if (waitMs > 0) await sleep(waitMs);
+    lastGroupSendAt = Date.now();
     let groupResult = await tgCall('sendMessage', { chat_id: TELEGRAM_GROUP_CHAT, text, parse_mode: 'Markdown' });
     if (groupResult && groupResult.ok === false && groupResult.error_code === 429) {
       const retryAfterSec = (groupResult.parameters && groupResult.parameters.retry_after) || 2;
       await sleep(retryAfterSec * 1000);
+      lastGroupSendAt = Date.now();
       groupResult = await tgCall('sendMessage', { chat_id: TELEGRAM_GROUP_CHAT, text, parse_mode: 'Markdown' });
     }
     if (groupResult && groupResult.ok === false) {
