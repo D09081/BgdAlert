@@ -69,7 +69,17 @@ async function fetchChannelMessagesOnce(channel) {
   $('.tgme_widget_message').each((_, el) => {
     const $el = $(el);
     const idAttr = $el.attr('data-post') || '';
-    const textEl = $el.find('.tgme_widget_message_text').first();
+    // Если сообщение — ОТВЕТ на другое (reply), Telegram в превью канала
+    // показывает и цитату родительского сообщения, и сам текст ответа.
+    // Наивный .find('.tgme_widget_message_text').first() иногда цепляет
+    // текст ИЗ ЦИТАТЫ (родительского сообщения), а не сам ответ — например,
+    // ответ "Отбой" на сообщение "Ракетная опасность" тогда парсится как
+    // "Ракетная опасность" и публикуется с неверным типом. Поэтому явно
+    // исключаем текст, лежащий внутри блока цитаты (.tgme_widget_message_reply),
+    // и берём последний оставшийся блок — это и есть текст самого сообщения.
+    const textCandidates = $el.find('.tgme_widget_message_text')
+      .filter((__, e) => $(e).parents('.tgme_widget_message_reply').length === 0);
+    const textEl = textCandidates.length ? textCandidates.last() : $el.find('.tgme_widget_message_text').first();
     if (!textEl.length) return; // сообщение без текста (только медиа) — пропускаем
 
     // Заменяем <br> на переносы перед извлечением текста
