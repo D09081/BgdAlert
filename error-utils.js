@@ -27,7 +27,18 @@ function describeError(err) {
   if (err.response) {
     const status = err.response.status;
     const data = err.response.data;
-    const desc = data && (data.description || (typeof data === 'string' ? data : JSON.stringify(data)));
+    let desc = '';
+    if (data && typeof data === 'object') {
+      desc = data.description || JSON.stringify(data);
+    } else if (typeof data === 'string' && data) {
+      // Ответ иногда НЕ JSON, а голая HTML-страница ошибки (типично для
+      // 502/503/504 от nginx/прокси перед самим Telegram) — раньше такая
+      // страница целиком (сотни символов разметки) улетала в лог как есть.
+      // Вырезаем теги, схлопываем пробелы, обрезаем до разумной длины —
+      // достаточно сути ("502 Bad Gateway nginx/1.30.1"), а не всей вёрстки.
+      const stripped = data.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      desc = stripped.length > 150 ? stripped.slice(0, 150) + '…' : stripped;
+    }
     return `HTTP ${status}${desc ? ' — ' + desc : ''}`;
   }
 

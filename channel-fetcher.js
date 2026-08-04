@@ -138,18 +138,36 @@ async function fetchChannelMessages(channel) {
 // Опрашивает ВСЕ каналы параллельно и возвращает результат по каждому
 // отдельно — вызывающий код (pollOnce в server.js) сам решает, что делать
 // с успехами и ошибками, не дожидаясь друг друга.
-// Возвращает: [{ channel, ok, msgs, error }, ...] — в том же порядке, что и channels.
+// ВАЖНО: fetchChannelMessages() сама может повторять попытку до 3 раз с
+// паузами — в худшем случае это ~32 сек для ОДНОГО упорно сбоящего канала
+// (несколько 502/таймаутов подряд). Раньше Promise.allSettled ждал ВСЕ
+// каналы до конца, то есть весь цикл опроса (а с ним и публикация
+// сообщений из уже готовых, здоровых каналов) стоял и ждал именно этот
+// один медленный канал — что для оповещений о ракетной опасности/БПЛА
+// недопустимо. Поэтому каждый канал ограничен CYCLE_BUDGET_MS В РАМКАХ
+// ЭТОГО цикла: если канал не успел (со всеми своими повторами) уложиться,
+// цикл идёт дальше без него, а сам запрос НЕ прерывается — он продолжает
+// выполняться в фоне (через inFlight, см. выше) и просто будет учтён,
+// когда завершится, следующим циклом опроса — работа не теряется, просто
+// не блокирует остальных.
+const CYCLE_BUDGET_MS = 12000;
+
 async function fetchAllChannels(channels) {
-  const settled = await Promise.allSettled(
-    channels.map((ch, i) => sleep(i * STAGGER_STEP_MS).then(() => fetchChannelMessages(ch)))
+  const PENDING = Symbol('pending');
+  return Promise.all(
+    channels.map(async (channel, i) => {
+      await sleep(i * STAGGER_STEP_MS);
+      const fetchPromise = fetchChannelMessages(channel); // уже дедуплицируется через inFlight
+      const raceResult = await Promise.race([
+        fetchPromise.then((msgs) => ({ ok: true, msgs, error: null })).catch((err) => ({ ok: false, msgs: [], error: describeError(err) })),
+        sleep(CYCLE_BUDGET_MS).then(() => PENDING)
+      ]);
+      if (raceResult === PENDING) {
+        return { channel, ok: false, msgs: [], error: null, pending: true };
+      }
+      return { channel, ...raceResult };
+    })
   );
-  return channels.map((channel, i) => {
-    const r = settled[i];
-    if (r.status === 'fulfilled') {
-      return { channel, ok: true, msgs: r.value, error: null };
-    }
-    return { channel, ok: false, msgs: [], error: describeError(r.reason) };
-  });
 }
 
 module.exports = { fetchChannelMessages, fetchAllChannels, CHANNEL_TIMEOUT_MS };
