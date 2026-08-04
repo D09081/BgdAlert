@@ -269,6 +269,13 @@
   .feed-tag.admin { color: var(--purple); }
   .feed-tag.notice { color: var(--blue); }
   .feed-text { font-size: 14px; line-height: 1.5; color: var(--text); word-break: break-word; }
+  .feed-promo {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 10px;
+    padding: 7px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 600;
+    color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-glow);
+    text-decoration: none; transition: background .15s;
+  }
+  .feed-promo:hover { background: var(--accent-glow); }
   .feed-meta {
     display: flex; align-items: center; gap: 8px;
     font-size: 12px; color: var(--text-secondary); margin-top: 10px;
@@ -696,6 +703,7 @@
 // Если фронтенд статичный, а backend отдельно (Render/Railway/VPS) —
 // впишите его адрес, например: 'https://trevoga-belgorod.onrender.com'
 const API_BASE = '';
+var promoChannelUrl = ''; // подтягивается из /api/telegram-config — пусто, пока не загружено
 // ============================================================
 
 var regionNames = {
@@ -807,10 +815,16 @@ function feedItemInnerHtml(item) {
   var manualBadge = item.manual ? '<span class="feed-region" style="background:rgba(168,85,247,0.15);color:var(--purple);">вручную</span>' : '';
   var timeTitle = item.iso ? ' title="' + item.iso + '"' : '';
   var timeNote = item.hasRealTime === false ? ' <span style="opacity:.6">(время сервера)</span>' : '';
+  // Приглашение подписаться на канал — под текстом каждой карточки. Пусто,
+  // пока /api/telegram-config ещё не загрузился при первом заходе — тогда
+  // просто не показываем блок, ничего не ломается.
+  var promoHtml = promoChannelUrl ?
+    '<a class="feed-promo" href="' + promoChannelUrl + '" target="_blank" rel="noopener">⚡ Узнавай первым — подписывайся на канал</a>' : '';
   return '<div class="feed-ico ' + item.t + '">' + item.i + '</div>' +
     '<div class="feed-body">' +
     '<div class="feed-tag ' + item.t + '">' + item.tag + regionBadge + manualBadge + '</div>' +
     '<div class="feed-text">' + item.txt + '</div>' +
+    promoHtml +
     '<div class="feed-meta"' + timeTitle + '>' +
     '<span class="feed-dot ' + (item.isNew ? 'pulse' : '') + '"></span>' +
     '<span>' + item.time + timeNote + '</span><span>·</span><span>' + item.date + '</span>' +
@@ -1340,6 +1354,10 @@ async function loadTelegramConfig() {
     if (data && data.botUsername) {
       document.getElementById('tgSubscribeLink').href = 'https://t.me/' + data.botUsername + '?start=1';
       document.getElementById('tgSubscribeBlock').style.display = 'block';
+    }
+    if (data && data.promoChannelUrl && data.promoChannelUrl !== promoChannelUrl) {
+      promoChannelUrl = data.promoChannelUrl;
+      render(); // карточки, отрисованные до загрузки конфига, иначе остались бы без ссылки
     }
   } catch (err) { console.log('Telegram config error:', err); }
 }
