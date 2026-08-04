@@ -171,6 +171,7 @@
     <button class="tab-btn" data-tab="alarm" type="button">🔔 Тревога</button>
     <button class="tab-btn" data-tab="manual" type="button">✍️ Ручная отправка</button>
     <button class="tab-btn" data-tab="tgadmins" type="button">👤 Админы Telegram</button>
+    <button class="tab-btn" data-tab="settings" type="button">⚙️ Настройки</button>
     <button class="tab-btn" data-tab="logs" type="button">🧾 Логи</button>
   </div>
 
@@ -386,6 +387,16 @@
     </div>
   </div>
 
+  <!-- ===== Вкладка: Настройки ===== -->
+  <div class="tab-panel" id="tab-settings">
+    <div class="panel">
+      <h2>⚙️ Настройки</h2>
+      <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">Меняются сразу, без переустановки/редеплоя сервера. Пустое поле при сохранении игнорируется — прежнее значение остаётся.</p>
+      <div id="settingsFields">Загрузка…</div>
+      <button class="btn" id="saveSettingsBtn" type="button" style="margin-top:12px;">💾 Сохранить</button>
+    </div>
+  </div>
+
   <!-- ===== Вкладка: Логи ===== -->
   <div class="tab-panel" id="tab-logs">
     <div class="panel">
@@ -475,6 +486,7 @@ function showDashboard() {
   loadChannels();
   loadFilterWords();
   loadAlarmConfig();
+  loadSettings();
   loadLogs();
   loadFeedList();
   loadTgUsers();
@@ -874,6 +886,40 @@ function renderAlarmChips() {
   renderChipBox('alarmRegionsBox', ALARM_REGION_LABELS, alarmSelectedRegions, renderAlarmChips);
 }
 
+// Поля отрисовываются динамически по тому, что вернул сервер (EDITABLE_SETTINGS
+// в server.js) — чтобы добавить новую редактируемую настройку в будущем,
+// не нужно ничего менять здесь, только на сервере.
+async function loadSettings() {
+  var container = document.getElementById('settingsFields');
+  try {
+    var data = await apiGet('/api/admin/settings');
+    var fields = data.fields || [];
+    if (!fields.length) { container.innerHTML = 'Нет доступных настроек'; return; }
+    container.innerHTML = fields.map(function(f) {
+      return '<div class="form-row" style="margin-bottom:14px;">' +
+        '<label>' + f.label + '</label>' +
+        '<input type="text" data-settings-key="' + f.key + '" value="' + (f.value || '').replace(/"/g, '&quot;') + '">' +
+        (f.hint ? '<p style="font-size:11px;color:var(--text-secondary);margin-top:4px;">' + f.hint + '</p>' : '') +
+        '</div>';
+    }).join('');
+  } catch (err) {
+    container.innerHTML = 'Ошибка загрузки';
+    toast('Не удалось загрузить настройки: ' + err.message, 'err');
+  }
+}
+
+async function saveSettings() {
+  var inputs = document.querySelectorAll('#settingsFields [data-settings-key]');
+  var body = {};
+  inputs.forEach(function(inp) { body[inp.getAttribute('data-settings-key')] = inp.value; });
+  try {
+    await apiPost('/api/admin/settings', body);
+    toast('Настройки сохранены', 'ok');
+  } catch (err) {
+    toast('Ошибка сохранения: ' + err.message, 'err');
+  }
+}
+
 async function loadAlarmConfig() {
   try {
     var data = await apiGet('/api/admin/alarm-config');
@@ -993,6 +1039,7 @@ function initHandlers() {
   document.getElementById('addFilterWordBtn').addEventListener('click', addFilterWord);
   document.getElementById('newFilterWordInput').addEventListener('keydown', function(e) { if (e.key === 'Enter') addFilterWord(); });
   document.getElementById('saveAlarmBtn').addEventListener('click', saveAlarmConfig);
+  document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
   document.getElementById('refreshLogsBtn').addEventListener('click', loadLogs);
   document.querySelectorAll('[data-log-filter]').forEach(function(btn) {
     btn.addEventListener('click', function() {
