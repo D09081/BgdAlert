@@ -92,7 +92,8 @@ const REDIS_KEY_MAP = {
   [path.join(DATA_DIR, 'state.json')]: 'bgdalert:state',
   [path.join(DATA_DIR, 'analytics.json')]: 'bgdalert:analytics',
   [path.join(DATA_DIR, 'logs.json')]: 'bgdalert:logs',
-  [path.join(DATA_DIR, 'custom-filters.json')]: 'bgdalert:custom-filters'
+  [path.join(DATA_DIR, 'custom-filters.json')]: 'bgdalert:custom-filters',
+  [path.join(DATA_DIR, 'settings.json')]: 'bgdalert:settings'
 };
 const SUBS_FILE = path.join(DATA_DIR, 'subscriptions.json');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
@@ -296,17 +297,37 @@ addLog('info', 'Сервер запускается');
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || '';
 const TG_API = TELEGRAM_BOT_TOKEN ? `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}` : null;
-// Группа/канал, куда бот дублирует те же оповещения, что рассылает
-// подписчикам в личку — https://t.me/BgdAlert. Задаётся через переменную
-// окружения (можно сменить без правки кода); значение по умолчанию — сам
-// @BgdAlert. Бота нужно добавить в группу АДМИНИСТРАТОРОМ с правом
-// отправки сообщений, иначе sendMessage будет получать 403/400 — это не
-// баг кода, это права бота в самой группе.
-const TELEGRAM_GROUP_CHAT = process.env.TELEGRAM_GROUP_CHAT || '@BgdAlert';
-// Публичная ссылка на канал, которую показываем тем, кто ещё НЕ состоит в
-// нём — в личных сообщениях бота подписчикам и на карточках ленты сайта.
-// Группе @BgdAlert такую ссылку не показываем (её участники уже там).
-const PROMO_CHANNEL_URL = process.env.PROMO_CHANNEL_URL || 'https://t.me/BgdAlert';
+
+// Настройки, редактируемые прямо из веб-админки (вкладка «⚙️ Настройки»)
+// БЕЗ редеплоя — в отличие от переменных окружения, которые на большинстве
+// хостингов требуют пересборки/ручного перезапуска сервиса. При старте
+// используется сохранённое в settings.json значение, если оно есть; иначе —
+// переменная окружения (для совместимости с уже настроенными деплоями);
+// иначе — дефолт ниже. Чтобы добавить в будущем ещё одну редактируемую из
+// админки настройку — достаточно дописать запись в EDITABLE_SETTINGS и
+// прочитать её значение через getSetting(key) там, где она нужна по коду;
+// сохранение/API/форма в админке уже общие для всех записей этого списка.
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const EDITABLE_SETTINGS = [
+  {
+    key: 'telegramGroupChat', envVar: 'TELEGRAM_GROUP_CHAT', fallback: '@BgdAlert',
+    label: 'Группа/канал для дублирования оповещений',
+    hint: 'Бот должен быть добавлен туда администратором с правом отправки сообщений — иначе рассылка в группу будет падать с ошибкой в логах.'
+  },
+  {
+    key: 'promoChannelUrl', envVar: 'PROMO_CHANNEL_URL', fallback: 'https://t.me/BgdAlert',
+    label: 'Ссылка на канал (призыв подписаться)',
+    hint: 'Показывается в личных сообщениях бота подписчикам и на карточках ленты сайта — не в самой группе (её участники уже там).'
+  }
+];
+const savedSettings = loadJson(SETTINGS_FILE, {});
+let runtimeSettings = {};
+for (const s of EDITABLE_SETTINGS) {
+  runtimeSettings[s.key] = (savedSettings && savedSettings[s.key]) || process.env[s.envVar] || s.fallback;
+}
+if (!fs.existsSync(SETTINGS_FILE)) saveJson(SETTINGS_FILE, runtimeSettings);
+function getSetting(key) { return runtimeSettings[key]; }
+
 const TG_SUBS_FILE = path.join(DATA_DIR, 'telegram-subs.json');
 let tgSubscriptions = loadJson(TG_SUBS_FILE, []); // [{ chatId, regions: ['all'], joinedAt }]
 const TG_ADMINS_FILE = path.join(DATA_DIR, 'telegram-admins.json');
@@ -336,7 +357,8 @@ async function hydrateFromRedis() {
     { file: STATE_FILE, key: 'bgdalert:state', apply: (v) => { state = v; } },
     { file: ANALYTICS_FILE, key: 'bgdalert:analytics', apply: (v) => { analytics = v; normalizeAnalytics(); } },
     { file: LOGS_FILE, key: 'bgdalert:logs', apply: (v) => { logs = v; } },
-    { file: CUSTOM_FILTERS_FILE, key: 'bgdalert:custom-filters', apply: (v) => { customFilterWords = v; } }
+    { file: CUSTOM_FILTERS_FILE, key: 'bgdalert:custom-filters', apply: (v) => { customFilterWords = v; } },
+    { file: SETTINGS_FILE, key: 'bgdalert:settings', apply: (v) => { runtimeSettings = Object.assign({}, runtimeSettings, v); } }
   ];
   let restored = 0;
   for (const t of targets) {
@@ -943,26 +965,27 @@ async function notifyTelegramSubscribers(item) {
   // не для группы (её участники и так уже в канале/группе, повторять там
   // нечего). Показывается тем, кто узнаёт об угрозе через бота лично, но
   // ещё не в канале — то есть именно тем, кого имеет смысл заманивать.
-  const subscriberText = `${text}\n\n🔥 Узнал первым здесь? В канале ещё быстрее и без задержек — [подписывайся →](${PROMO_CHANNEL_URL})`;
+  const subscriberText = `${text}\n\n🔥 Узнал первым здесь? В канале ещё быстрее и без задержек — [подписывайся →](${getSetting('promoChannelUrl')})`;
 
   // Та же самая рассылка, что уходит подписчикам в личку, дублируется в
-  // группу (см. TELEGRAM_GROUP_CHAT выше) — те же 429/сетевые предосторожности,
-  // что и для личных подписчиков, но без удаления "подписки" при ошибке:
-  // группа не подписка, отсутствие прав у бота там не повод что-то стирать —
-  // просто логируем и пробуем в следующий раз.
-  if (TELEGRAM_GROUP_CHAT) {
+  // группу (см. EDITABLE_SETTINGS выше, ключ telegramGroupChat) — те же
+  // 429/сетевые предосторожности, что и для личных подписчиков, но без
+  // удаления "подписки" при ошибке: группа не подписка, отсутствие прав у
+  // бота там не повод что-то стирать — просто логируем и пробуем в следующий раз.
+  const groupChat = getSetting('telegramGroupChat');
+  if (groupChat) {
     const waitMs = GROUP_MIN_INTERVAL_MS - (Date.now() - lastGroupSendAt);
     if (waitMs > 0) await sleep(waitMs);
     lastGroupSendAt = Date.now();
-    let groupResult = await tgCall('sendMessage', { chat_id: TELEGRAM_GROUP_CHAT, text, parse_mode: 'Markdown' });
+    let groupResult = await tgCall('sendMessage', { chat_id: groupChat, text, parse_mode: 'Markdown' });
     if (groupResult && groupResult.ok === false && groupResult.error_code === 429) {
       const retryAfterSec = (groupResult.parameters && groupResult.parameters.retry_after) || 2;
       await sleep(retryAfterSec * 1000);
       lastGroupSendAt = Date.now();
-      groupResult = await tgCall('sendMessage', { chat_id: TELEGRAM_GROUP_CHAT, text, parse_mode: 'Markdown' });
+      groupResult = await tgCall('sendMessage', { chat_id: groupChat, text, parse_mode: 'Markdown' });
     }
     if (groupResult && groupResult.ok === false) {
-      addLog('error', `Не удалось отправить в группу ${TELEGRAM_GROUP_CHAT}: ${groupResult.description || 'неизвестная ошибка'}`);
+      addLog('error', `Не удалось отправить в группу ${groupChat}: ${groupResult.description || 'неизвестная ошибка'}`);
     }
   }
 
@@ -1663,7 +1686,7 @@ app.get('/api/vapid-public-key', (req, res) => {
 });
 
 app.get('/api/telegram-config', (req, res) => {
-  res.json({ botUsername: TELEGRAM_BOT_USERNAME || null, promoChannelUrl: PROMO_CHANNEL_URL || null });
+  res.json({ botUsername: TELEGRAM_BOT_USERNAME || null, promoChannelUrl: getSetting('promoChannelUrl') || null });
 });
 
 app.post('/api/subscribe', (req, res) => {
@@ -1900,6 +1923,36 @@ app.delete('/api/admin/filter-words', requireAdmin, (req, res) => {
 });
 
 // ===== Настройки звуковой тревоги (какие типы/районы дают громкий push) =====
+// Отдаём и текущие значения, и метаданные (подпись/подсказку) из
+// EDITABLE_SETTINGS — так админка может отрисовать форму настроек, просто
+// пройдясь по списку, без хардкода конкретных полей на фронте. Добавление
+// новой настройки в будущем требует правки только EDITABLE_SETTINGS выше —
+// ни это API, ни форма в admin.html переписывать не придётся.
+app.get('/api/admin/settings', requireAdmin, (req, res) => {
+  const fields = EDITABLE_SETTINGS.map((s) => ({
+    key: s.key, label: s.label, hint: s.hint, value: runtimeSettings[s.key]
+  }));
+  res.json({ fields });
+});
+
+app.post('/api/admin/settings', requireAdmin, (req, res) => {
+  const body = req.body || {};
+  const validKeys = new Set(EDITABLE_SETTINGS.map((s) => s.key));
+  let changed = false;
+  for (const key of Object.keys(body)) {
+    if (!validKeys.has(key)) continue; // игнорируем неизвестные ключи, а не падаем с ошибкой
+    const value = typeof body[key] === 'string' ? body[key].trim() : body[key];
+    if (!value) continue; // пустое значение не сохраняем — пусть остаётся прежнее/дефолт, а не пустая строка
+    runtimeSettings[key] = value;
+    changed = true;
+  }
+  if (changed) {
+    saveJson(SETTINGS_FILE, runtimeSettings);
+    addLog('info', 'Настройки изменены из админки', runtimeSettings);
+  }
+  res.json({ ok: true, fields: EDITABLE_SETTINGS.map((s) => ({ key: s.key, label: s.label, hint: s.hint, value: runtimeSettings[s.key] })) });
+});
+
 app.get('/api/admin/alarm-config', requireAdmin, (req, res) => {
   res.json(alarmConfig);
 });
