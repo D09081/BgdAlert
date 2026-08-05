@@ -71,7 +71,7 @@ function redisSet(key, value) {
 }
 
 const PORT = process.env.PORT || 3000;
-const POLL_MS = 10000; // частота обновления парсера — 10 секунд
+// частота опроса каналов теперь в EDITABLE_SETTINGS (ключ pollIntervalSec), см. ниже
 const DATA_DIR = path.join(__dirname, 'data');
 
 // НАЙДЕННЫЙ ПРИ ТЕСТИРОВАНИИ БАГ (та же природа, что и с логами ранее): если
@@ -305,27 +305,73 @@ const TG_API = TELEGRAM_BOT_TOKEN ? `https://api.telegram.org/bot${TELEGRAM_BOT_
 // переменная окружения (для совместимости с уже настроенными деплоями);
 // иначе — дефолт ниже. Чтобы добавить в будущем ещё одну редактируемую из
 // админки настройку — достаточно дописать запись в EDITABLE_SETTINGS и
-// прочитать её значение через getSetting(key) там, где она нужна по коду;
-// сохранение/API/форма в админке уже общие для всех записей этого списка.
+// прочитать её значение через getSetting(key)/getNumberSetting(key, дефолт)
+// там, где она нужна по коду; сохранение/API/форма в админке уже общие для
+// всех записей этого списка. type:'number' — рендерится как <input type=number>
+// с min/max/step, хранится и сравнивается как число, а не строка.
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const EDITABLE_SETTINGS = [
   {
-    key: 'telegramGroupChat', envVar: 'TELEGRAM_GROUP_CHAT', fallback: '@BgdAlert',
+    key: 'telegramGroupChat', envVar: 'TELEGRAM_GROUP_CHAT', fallback: '@BgdAlert', type: 'string',
     label: 'Группа/канал для дублирования оповещений',
     hint: 'Бот должен быть добавлен туда администратором с правом отправки сообщений — иначе рассылка в группу будет падать с ошибкой в логах.'
   },
   {
-    key: 'promoChannelUrl', envVar: 'PROMO_CHANNEL_URL', fallback: 'https://t.me/BgdAlert',
+    key: 'promoChannelUrl', envVar: 'PROMO_CHANNEL_URL', fallback: 'https://t.me/BgdAlert', type: 'string',
     label: 'Ссылка на канал (призыв подписаться)',
     hint: 'Показывается в личных сообщениях бота подписчикам и на карточках ленты сайта — не в самой группе (её участники уже там).'
+  },
+  {
+    key: 'pollIntervalSec', envVar: 'POLL_INTERVAL_SEC', fallback: '10', type: 'number', min: 5, max: 120, step: 1,
+    label: 'Частота опроса каналов (сек)',
+    hint: 'Как часто проверять каналы на новые сообщения. Меньше — быстрее узнаёте о тревоге, но выше нагрузка на t.me и риск сетевых сбоев. Применяется на следующем цикле опроса, без перезапуска сервера.'
+  },
+  {
+    key: 'groupIntervalMs', envVar: 'GROUP_MIN_INTERVAL_MS', fallback: '1500', type: 'number', min: 500, max: 10000, step: 100,
+    label: 'Пауза перед сообщением в группу (мс)',
+    hint: 'Минимальный интервал между сообщениями в группу — защита от блокировки Telegram (429), если разом приходит пачка новых событий. Уменьшать осторожно.'
+  },
+  {
+    key: 'alertTextLimit', envVar: 'ALERT_TEXT_LIMIT', fallback: '400', type: 'number', min: 100, max: 2000, step: 50,
+    label: 'Длина текста тревоги до обрезки (символов)',
+    hint: 'Настоящие тревоги (ракета/БПЛА/укрытие/отбой) обрезаются до этой длины — их читают за секунду, длинный текст только мешает. На новостные посты не влияет — те всегда показываются целиком.'
+  },
+  {
+    key: 'dedupeWindowMin', envVar: 'DEDUPE_WINDOW_MIN', fallback: '15', type: 'number', min: 1, max: 120, step: 1,
+    label: 'Окно дедупликации похожих сообщений (минут)',
+    hint: 'Сообщения одного типа и района в пределах этого окна, похожие по тексту, считаются повтором и не дублируются в ленте.'
+  },
+  {
+    key: 'cancelDefaultText', envVar: 'CANCEL_DEFAULT_TEXT',
+    fallback: 'Отбой ракетной опасности. Угроза обстрела сохраняется. Берегите себя.',
+    type: 'string', multiline: true,
+    label: 'Текст «✅ Отбой / отмена» по умолчанию',
+    hint: 'Подставляется, когда админ жмёт кнопку быстрого отбоя (на сайте или в боте), не вводя свой текст вручную. Свой текст при отправке всегда перекрывает это значение.'
+  },
+  {
+    key: 'promoCtaTemplate', envVar: 'PROMO_CTA_TEMPLATE',
+    fallback: '🔥 Узнал первым здесь? В канале ещё быстрее и без задержек — [подписывайся →]({url})',
+    type: 'string', multiline: true,
+    label: 'Текст призыва подписаться (в личных сообщениях подписчикам)',
+    hint: '{url} автоматически заменяется на ссылку из поля «Ссылка на канал» выше. Добавляется в конец каждого личного сообщения бота подписчику — не в группу (её участники уже там) и не на сайт (там своя кнопка).'
   }
 ];
 const savedSettings = loadJson(SETTINGS_FILE, {});
 let runtimeSettings = {};
 for (const s of EDITABLE_SETTINGS) {
-  runtimeSettings[s.key] = (savedSettings && savedSettings[s.key]) || process.env[s.envVar] || s.fallback;
+  const saved = savedSettings && savedSettings[s.key];
+  const envVal = process.env[s.envVar];
+  runtimeSettings[s.key] = (saved !== undefined && saved !== null && saved !== '') ? saved : (envVal || s.fallback);
 }
 if (!fs.existsSync(SETTINGS_FILE)) saveJson(SETTINGS_FILE, runtimeSettings);
+// Числовая настройка читается через эту обёртку, а не напрямую — на случай
+// если в settings.json окажется мусор (например, кто-то руками поправил
+// файл), парсинг всегда отдаёт валидное число, а не NaN, ломающее таймеры.
+function getNumberSetting(key, fallback) {
+  const raw = runtimeSettings[key];
+  const num = Number(raw);
+  return Number.isFinite(num) && num > 0 ? num : fallback;
+}
 function getSetting(key) { return runtimeSettings[key]; }
 
 const TG_SUBS_FILE = path.join(DATA_DIR, 'telegram-subs.json');
@@ -953,7 +999,6 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 // перед каждой отправкой в группу выдерживаем минимальный интервал от
 // предыдущей — не важно, из какого вызова notifyTelegramSubscribers он был.
 let lastGroupSendAt = 0;
-const GROUP_MIN_INTERVAL_MS = 1500;
 
 async function notifyTelegramSubscribers(item) {
   if (!TG_API) return;
@@ -965,7 +1010,11 @@ async function notifyTelegramSubscribers(item) {
   // не для группы (её участники и так уже в канале/группе, повторять там
   // нечего). Показывается тем, кто узнаёт об угрозе через бота лично, но
   // ещё не в канале — то есть именно тем, кого имеет смысл заманивать.
-  const subscriberText = `${text}\n\n🔥 Узнал первым здесь? В канале ещё быстрее и без задержек — [подписывайся →](${getSetting('promoChannelUrl')})`;
+  // Текст шаблона редактируется из админки (promoCtaTemplate), {url} —
+  // плейсхолдер, подставляется значение promoChannelUrl (тоже редактируемое).
+  const ctaTemplate = getSetting('promoCtaTemplate') || '';
+  const cta = ctaTemplate.replace('{url}', getSetting('promoChannelUrl') || '');
+  const subscriberText = cta ? `${text}\n\n${cta}` : text;
 
   // Та же самая рассылка, что уходит подписчикам в личку, дублируется в
   // группу (см. EDITABLE_SETTINGS выше, ключ telegramGroupChat) — те же
@@ -974,7 +1023,7 @@ async function notifyTelegramSubscribers(item) {
   // бота там не повод что-то стирать — просто логируем и пробуем в следующий раз.
   const groupChat = getSetting('telegramGroupChat');
   if (groupChat) {
-    const waitMs = GROUP_MIN_INTERVAL_MS - (Date.now() - lastGroupSendAt);
+    const waitMs = getNumberSetting('groupIntervalMs', 1500) - (Date.now() - lastGroupSendAt);
     if (waitMs > 0) await sleep(waitMs);
     lastGroupSendAt = Date.now();
     let groupResult = await tgCall('sendMessage', { chat_id: groupChat, text, parse_mode: 'Markdown' });
@@ -1348,7 +1397,6 @@ function recordVisit(req) {
 // обрезка на середине предложения там только мешает. NEWS_SAFETY_CAP —
 // просто защита от аномально гигантского поста (не обычный случай), а не
 // обычная граница отображения.
-const ALERT_TEXT_LIMIT = 400;
 const NEWS_SAFETY_CAP = 4000;
 
 function formatFeedItem(msg) {
@@ -1360,7 +1408,7 @@ function formatFeedItem(msg) {
   const dt = hasRealTime ? new Date(msg.datetime) : new Date();
   const time = dt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
   const date = dt.toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', timeZone: 'Europe/Moscow' });
-  const limit = isNews ? NEWS_SAFETY_CAP : ALERT_TEXT_LIMIT;
+  const limit = isNews ? NEWS_SAFETY_CAP : getNumberSetting('alertTextLimit', 400);
   return {
     id: msg.id,
     t: cls.t, i: cls.i, tag: cls.tag,
@@ -1406,7 +1454,6 @@ function containmentRatio(a, b) {
   return inter / minSize;
 }
 
-const DEDUPE_WINDOW_MS = 15 * 60 * 1000; // сообщения из разных каналов об одном и том же обычно приходят почти одновременно
 const DEDUPE_SIMILARITY = 0.55;
 const DEDUPE_CONTAINMENT = 0.8;
 // Доп. защита: если два сообщения пришли почти одновременно (в пределах
@@ -1421,6 +1468,7 @@ const SHORT_DEDUPE_SIMILARITY = 0.75;
 const SHORT_DEDUPE_CONTAINMENT = 0.9;
 
 function dedupeItems(items) {
+  const dedupeWindowMs = getNumberSetting('dedupeWindowMin', 15) * 60 * 1000;
   const sorted = items.slice().sort((a, b) => a.ts - b.ts); // старые первыми — канонический экземпляр стабилен между опросами
   const result = [];
   for (const it of sorted) {
@@ -1439,13 +1487,13 @@ function dedupeItems(items) {
       // реальных случая, и склеивать их по типу без сравнения текста
       // опасно), поэтому для cancel сравниваем только тип и время, без
       // текста и района.
-      if (r.t === 'cancel' && it.t === 'cancel' && dt <= DEDUPE_WINDOW_MS) {
+      if (r.t === 'cancel' && it.t === 'cancel' && dt <= dedupeWindowMs) {
         dup = r; break;
       }
       const sameBucket = r.t === it.t && r.region === it.region;
       // Вне "своего" типа/района сравниваем, только если оба сообщения
       // попали в короткое окно — иначе просто пропускаем пару.
-      if (sameBucket && dt > DEDUPE_WINDOW_MS) continue;
+      if (sameBucket && dt > dedupeWindowMs) continue;
       if (!sameBucket && dt > SHORT_DEDUPE_WINDOW_MS) continue;
       const rWords = wordSet(r.txt);
       const sim = jaccardSimilarity(itWords, rWords);
@@ -1500,8 +1548,8 @@ function startOfTodayMoscowMs() {
 // подключение Upstash Redis, тогда seenIds переживает рестарт по-честному.
 let bootGraceActive = true;
 
-// setInterval(pollOnce, POLL_MS) запускает следующий вызов каждые 10 сек по
-// часам, НЕЗАВИСИМО от того, завершился ли предыдущий вызов. Если рассылка
+// Раньше здесь стоял setInterval(pollOnce, POLL_MS), который запускал
+// следующий вызов каждые 10 сек по часам, НЕЗАВИСИМО от того, завершился ли предыдущий вызов. Если рассылка
 // подписчикам+группе (с учётом пауз между сообщениями и повторов при 429)
 // в какой-то момент не укладывается в 10 секунд, второй цикл опроса и
 // рассылки стартует ПОВЕРХ первого — оба параллельно шлют сообщения в
@@ -1930,19 +1978,32 @@ app.delete('/api/admin/filter-words', requireAdmin, (req, res) => {
 // ни это API, ни форма в admin.html переписывать не придётся.
 app.get('/api/admin/settings', requireAdmin, (req, res) => {
   const fields = EDITABLE_SETTINGS.map((s) => ({
-    key: s.key, label: s.label, hint: s.hint, value: runtimeSettings[s.key]
+    key: s.key, label: s.label, hint: s.hint, value: runtimeSettings[s.key],
+    type: s.type || 'string', min: s.min, max: s.max, step: s.step, multiline: !!s.multiline
   }));
   res.json({ fields });
 });
 
 app.post('/api/admin/settings', requireAdmin, (req, res) => {
   const body = req.body || {};
-  const validKeys = new Set(EDITABLE_SETTINGS.map((s) => s.key));
+  const registry = new Map(EDITABLE_SETTINGS.map((s) => [s.key, s]));
   let changed = false;
+  const rejected = [];
   for (const key of Object.keys(body)) {
-    if (!validKeys.has(key)) continue; // игнорируем неизвестные ключи, а не падаем с ошибкой
-    const value = typeof body[key] === 'string' ? body[key].trim() : body[key];
-    if (!value) continue; // пустое значение не сохраняем — пусть остаётся прежнее/дефолт, а не пустая строка
+    const spec = registry.get(key);
+    if (!spec) continue; // неизвестный ключ — игнорируем, а не падаем с ошибкой
+    let value = typeof body[key] === 'string' ? body[key].trim() : body[key];
+    if (value === '' || value === null || value === undefined) continue; // пусто — оставляем прежнее значение
+    if (spec.type === 'number') {
+      const num = Number(value);
+      if (!Number.isFinite(num)) { rejected.push(`${key}: не число`); continue; }
+      // min/max — не просто подсказка в UI, а реальная граница: значение вне
+      // диапазона могло бы, например, увести таймаут запроса в 0 (вечный цикл
+      // ошибок) или окно дедупликации в часы (склеит разные реальные тревоги).
+      if (typeof spec.min === 'number' && num < spec.min) { rejected.push(`${key}: меньше минимума (${spec.min})`); continue; }
+      if (typeof spec.max === 'number' && num > spec.max) { rejected.push(`${key}: больше максимума (${spec.max})`); continue; }
+      value = num;
+    }
     runtimeSettings[key] = value;
     changed = true;
   }
@@ -1950,7 +2011,11 @@ app.post('/api/admin/settings', requireAdmin, (req, res) => {
     saveJson(SETTINGS_FILE, runtimeSettings);
     addLog('info', 'Настройки изменены из админки', runtimeSettings);
   }
-  res.json({ ok: true, fields: EDITABLE_SETTINGS.map((s) => ({ key: s.key, label: s.label, hint: s.hint, value: runtimeSettings[s.key] })) });
+  const fields = EDITABLE_SETTINGS.map((s) => ({
+    key: s.key, label: s.label, hint: s.hint, value: runtimeSettings[s.key],
+    type: s.type || 'string', min: s.min, max: s.max, step: s.step, multiline: !!s.multiline
+  }));
+  res.json({ ok: rejected.length === 0, rejected: rejected.length ? rejected : undefined, fields });
 });
 
 app.get('/api/admin/alarm-config', requireAdmin, (req, res) => {
@@ -2050,7 +2115,7 @@ async function publishCancel(region, text) {
   const item = {
     id: 'manual-cancel-' + dt.getTime(),
     t: 'cancel', i: '✅', tag: 'Отбой / отмена',
-    txt: text && text.trim() ? text.trim() : 'Отбой ракетной опасности. Угроза обстрела сохраняется. Берегите себя.',
+    txt: text && text.trim() ? text.trim() : getSetting('cancelDefaultText'),
     time: dt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' }),
     date: dt.toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', timeZone: 'Europe/Moscow' }),
     region: region || 'all',
@@ -2120,7 +2185,19 @@ app.use((err, req, res, next) => {
   app.listen(PORT, () => {
     console.log(`Тревога · Белгород — сервер запущен на порту ${PORT}`);
     addLog('info', `Сервер запущен на порту ${PORT}`);
-    pollOnce();
-    setInterval(pollOnce, POLL_MS);
+    pollLoop();
   });
 })();
+
+// Частота опроса каналов теперь настраивается из веб-админки
+// (pollIntervalSec) и может меняться "на лету", без перезапуска сервера —
+// setInterval так не умеет, он фиксирует интервал один раз при старте и
+// не замечает изменений в settings.json. Вместо него — self-rescheduling
+// setTimeout: следующий вызов планируется ТОЛЬКО после того как текущий
+// цикл (опрос + вся рассылка) полностью завершился, и каждый раз заново
+// читает актуальное значение настройки.
+async function pollLoop() {
+  await pollOnce();
+  const intervalMs = getNumberSetting('pollIntervalSec', 10) * 1000;
+  setTimeout(pollLoop, intervalMs);
+}
