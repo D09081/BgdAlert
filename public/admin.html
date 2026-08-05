@@ -896,9 +896,20 @@ async function loadSettings() {
     var fields = data.fields || [];
     if (!fields.length) { container.innerHTML = 'Нет доступных настроек'; return; }
     container.innerHTML = fields.map(function(f) {
+      var isNumber = f.type === 'number';
+      var attrs = 'data-settings-key="' + f.key + '" data-settings-type="' + f.type + '"';
+      if (isNumber) {
+        if (f.min !== undefined) attrs += ' min="' + f.min + '"';
+        if (f.max !== undefined) attrs += ' max="' + f.max + '"';
+        if (f.step !== undefined) attrs += ' step="' + f.step + '"';
+      }
+      var valueStr = String(f.value != null ? f.value : '');
+      var control = f.multiline ?
+        '<textarea ' + attrs + ' rows="3">' + valueStr.replace(/</g, '&lt;') + '</textarea>' :
+        '<input type="' + (isNumber ? 'number' : 'text') + '" ' + attrs + ' value="' + valueStr.replace(/"/g, '&quot;') + '">';
       return '<div class="form-row" style="margin-bottom:14px;">' +
         '<label>' + f.label + '</label>' +
-        '<input type="text" data-settings-key="' + f.key + '" value="' + (f.value || '').replace(/"/g, '&quot;') + '">' +
+        control +
         (f.hint ? '<p style="font-size:11px;color:var(--text-secondary);margin-top:4px;">' + f.hint + '</p>' : '') +
         '</div>';
     }).join('');
@@ -911,13 +922,26 @@ async function loadSettings() {
 async function saveSettings() {
   var inputs = document.querySelectorAll('#settingsFields [data-settings-key]');
   var body = {};
-  inputs.forEach(function(inp) { body[inp.getAttribute('data-settings-key')] = inp.value; });
+  inputs.forEach(function(inp) {
+    var key = inp.getAttribute('data-settings-key');
+    var isNumber = inp.getAttribute('data-settings-type') === 'number';
+    body[key] = isNumber ? Number(inp.value) : inp.value;
+  });
   try {
-    await apiPost('/api/admin/settings', body);
-    toast('Настройки сохранены', 'ok');
+    var res = await apiPost('/api/admin/settings', body);
+    if (res.rejected && res.rejected.length) {
+      // Частичное сохранение: сервер отклонил значения вне допустимого
+      // диапазона (min/max), остальные поля при этом всё равно сохранились —
+      // показываем, что именно не прошло, вместо общего "ошибка".
+      toast('Не сохранено: ' + res.rejected.join('; '), 'err');
+    } else {
+      toast('Настройки сохранены', 'ok');
+    }
+    loadSettings(); // подтягиваем актуальные значения (например, отклонённые поля откатятся к прежним)
   } catch (err) {
     toast('Ошибка сохранения: ' + err.message, 'err');
   }
+}
 }
 
 async function loadAlarmConfig() {
