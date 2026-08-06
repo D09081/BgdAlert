@@ -354,6 +354,12 @@ const EDITABLE_SETTINGS = [
     type: 'string', multiline: true,
     label: 'Текст призыва подписаться (в личных сообщениях подписчикам)',
     hint: '{url} автоматически заменяется на ссылку из поля «Ссылка на канал» выше. Добавляется в конец каждого личного сообщения бота подписчику — не в группу (её участники уже там) и не на сайт (там своя кнопка).'
+  },
+  {
+    key: 'groupCtaTemplate', envVar: 'GROUP_CTA_TEMPLATE', fallback: '',
+    type: 'string', multiline: true,
+    label: 'Текст в конце сообщений в группе/канале',
+    hint: 'Та же идея, что и текст призыва выше, но для сообщений, которые уходят в группу/канал (см. поле «Группа/канал для дублирования» выше), а не подписчикам в личку. {url} тоже подставляется автоматически. Пусто по умолчанию — сообщения в группе уходят как есть, без добавок.'
   }
 ];
 const savedSettings = loadJson(SETTINGS_FILE, {});
@@ -1023,15 +1029,22 @@ async function notifyTelegramSubscribers(item) {
   // бота там не повод что-то стирать — просто логируем и пробуем в следующий раз.
   const groupChat = getSetting('telegramGroupChat');
   if (groupChat) {
+    // Тот же принцип, что и для личных сообщений подписчикам (см. cta/subscriberText
+    // выше), но отдельный шаблон и по умолчанию пустой — сообщения в группе
+    // раньше уходили как есть, без добавок, и это поведение не должно
+    // поменяться само по себе для тех, кто это поле не заполнял.
+    const groupCtaTemplate = getSetting('groupCtaTemplate') || '';
+    const groupCta = groupCtaTemplate.replace('{url}', getSetting('promoChannelUrl') || '');
+    const groupText = groupCta ? `${text}\n\n${groupCta}` : text;
     const waitMs = getNumberSetting('groupIntervalMs', 1500) - (Date.now() - lastGroupSendAt);
     if (waitMs > 0) await sleep(waitMs);
     lastGroupSendAt = Date.now();
-    let groupResult = await tgCall('sendMessage', { chat_id: groupChat, text, parse_mode: 'Markdown' });
+    let groupResult = await tgCall('sendMessage', { chat_id: groupChat, text: groupText, parse_mode: 'Markdown' });
     if (groupResult && groupResult.ok === false && groupResult.error_code === 429) {
       const retryAfterSec = (groupResult.parameters && groupResult.parameters.retry_after) || 2;
       await sleep(retryAfterSec * 1000);
       lastGroupSendAt = Date.now();
-      groupResult = await tgCall('sendMessage', { chat_id: groupChat, text, parse_mode: 'Markdown' });
+      groupResult = await tgCall('sendMessage', { chat_id: groupChat, text: groupText, parse_mode: 'Markdown' });
     }
     if (groupResult && groupResult.ok === false) {
       addLog('error', `Не удалось отправить в группу ${groupChat}: ${groupResult.description || 'неизвестная ошибка'}`);
