@@ -351,15 +351,15 @@ const EDITABLE_SETTINGS = [
   {
     key: 'promoCtaTemplate', envVar: 'PROMO_CTA_TEMPLATE',
     fallback: '🔥 Узнал первым здесь? В канале ещё быстрее и без задержек — [подписывайся →]({url})',
-    type: 'string', multiline: true,
+    type: 'string', multiline: true, validateMarkdown: true,
     label: 'Текст призыва подписаться (в личных сообщениях подписчикам)',
-    hint: '{url} автоматически заменяется на ссылку из поля «Ссылка на канал» выше. Добавляется в конец каждого личного сообщения бота подписчику — не в группу (её участники уже там) и не на сайт (там своя кнопка).'
+    hint: '{url} автоматически заменяется на ссылку из поля «Ссылка на канал» выше. Добавляется в конец каждого личного сообщения бота подписчику — не в группу (её участники уже там) и не на сайт (там своя кнопка). Здесь работает настоящая Markdown-разметка Telegram (*жирный*, _курсив_, [текст](ссылка)) — следи за тем, чтобы все скобки/звёздочки/подчёркивания были парами, иначе сообщения перестанут доставляться.'
   },
   {
     key: 'groupCtaTemplate', envVar: 'GROUP_CTA_TEMPLATE', fallback: '',
-    type: 'string', multiline: true,
+    type: 'string', multiline: true, validateMarkdown: true,
     label: 'Текст в конце сообщений в группе/канале',
-    hint: 'Та же идея, что и текст призыва выше, но для сообщений, которые уходят в группу/канал (см. поле «Группа/канал для дублирования» выше), а не подписчикам в личку. {url} тоже подставляется автоматически. Пусто по умолчанию — сообщения в группе уходят как есть, без добавок.'
+    hint: 'Та же идея, что и текст призыва выше, но для сообщений, которые уходят в группу/канал (см. поле «Группа/канал для дублирования» выше), а не подписчикам в личку. {url} тоже подставляется автоматически. Пусто по умолчанию — сообщения в группе уходят как есть, без добавок. Здесь тоже настоящая Markdown-разметка — следи за парностью скобок/звёздочек/подчёркиваний.'
   }
 ];
 const savedSettings = loadJson(SETTINGS_FILE, {});
@@ -370,6 +370,32 @@ for (const s of EDITABLE_SETTINGS) {
   runtimeSettings[s.key] = (saved !== undefined && saved !== null && saved !== '') ? saved : (envVal || s.fallback);
 }
 if (!fs.existsSync(SETTINGS_FILE)) saveJson(SETTINGS_FILE, runtimeSettings);
+
+// Поля с validateMarkdown:true (см. EDITABLE_SETTINGS) содержат НАСТОЯЩУЮ
+// Markdown-разметку Telegram — в отличие от cancelDefaultText, который потом
+// проходит через escMd() при отправке (см. publishCancel → notifyTelegramSubscribers),
+// эти шаблоны вставляются в текст сообщения как есть, без экранирования —
+// иначе ссылка [текст](url) просто не работала бы как ссылка. Значит, если
+// админ допустит опечатку (забыл закрыть скобку, лишнее подчёркивание),
+// Telegram откажется парсить ВСЁ сообщение целиком с ошибкой "can't parse
+// entities" — и оповещение о реальной угрозе просто не дойдёт. Ловим такие
+// опечатки на сохранении, а не постфактум по логам с ошибками доставки.
+function validateMarkdownBalance(text) {
+  // Экранированные последовательности (\_, \*, \`, \[, \]) разметку не
+  // образуют — исключаем их из подсчёта, иначе легитимный экранированный
+  // символ ложно засчитается как "непарный".
+  const stripped = String(text).replace(/\\[_*`[\]]/g, '');
+  const errors = [];
+  for (const ch of ['_', '*', '`']) {
+    const count = (stripped.match(new RegExp('\\' + ch, 'g')) || []).length;
+    if (count % 2 !== 0) errors.push(`нечётное число символов «${ch}» — Telegram не сможет разобрать разметку`);
+  }
+  const openBrackets = (stripped.match(/\[/g) || []).length;
+  const closeBrackets = (stripped.match(/\]/g) || []).length;
+  if (openBrackets !== closeBrackets) errors.push('несовпадающее число «[» и «]»');
+  return errors;
+}
+
 // Числовая настройка читается через эту обёртку, а не напрямую — на случай
 // если в settings.json окажется мусор (например, кто-то руками поправил
 // файл), парсинг всегда отдаёт валидное число, а не NaN, ломающее таймеры.
@@ -1006,6 +1032,26 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 // предыдущей — не важно, из какого вызова notifyTelegramSubscribers он был.
 let lastGroupSendAt = 0;
 
+// Единая отправка текстового сообщения с Markdown-разметкой + аварийный
+// откат: если Telegram всё-таки не смог распарсить разметку ("can't parse
+// entities" — например опечатка в CTA-шаблоне, отредактированном через
+// админку, не отловленная валидацией на сохранении, или админ поправил
+// settings.json руками мимо валидации), сообщение не теряется — уходит ещё
+// раз уже БЕЗ разметки, обычным текстом. Содержание оповещения важнее
+// жирного/курсива, а раньше такие сообщения просто не доходили вовсе.
+async function sendTelegramTextSafe(chatId, text) {
+  let result = await tgCall('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown' });
+  if (result && result.ok === false && result.error_code === 429) {
+    const retryAfterSec = (result.parameters && result.parameters.retry_after) || 2;
+    await sleep(retryAfterSec * 1000);
+    result = await tgCall('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown' });
+  }
+  if (result && result.ok === false && result.error_code === 400 && /parse entities/i.test(result.description || '')) {
+    result = await tgCall('sendMessage', { chat_id: chatId, text }); // без parse_mode — гарантированно доставится
+  }
+  return result;
+}
+
 async function notifyTelegramSubscribers(item) {
   if (!TG_API) return;
   const isUrgent = isAlarmTriggering(item);
@@ -1039,13 +1085,7 @@ async function notifyTelegramSubscribers(item) {
     const waitMs = getNumberSetting('groupIntervalMs', 1500) - (Date.now() - lastGroupSendAt);
     if (waitMs > 0) await sleep(waitMs);
     lastGroupSendAt = Date.now();
-    let groupResult = await tgCall('sendMessage', { chat_id: groupChat, text: groupText, parse_mode: 'Markdown' });
-    if (groupResult && groupResult.ok === false && groupResult.error_code === 429) {
-      const retryAfterSec = (groupResult.parameters && groupResult.parameters.retry_after) || 2;
-      await sleep(retryAfterSec * 1000);
-      lastGroupSendAt = Date.now();
-      groupResult = await tgCall('sendMessage', { chat_id: groupChat, text: groupText, parse_mode: 'Markdown' });
-    }
+    const groupResult = await sendTelegramTextSafe(groupChat, groupText);
     if (groupResult && groupResult.ok === false) {
       addLog('error', `Не удалось отправить в группу ${groupChat}: ${groupResult.description || 'неизвестная ошибка'}`);
     }
@@ -1056,15 +1096,7 @@ async function notifyTelegramSubscribers(item) {
   for (const entry of tgSubscriptions) {
     const matches = item.region === 'all' || (entry.regions && (entry.regions.includes('all') || entry.regions.includes(item.region)));
     if (!matches) { stillValid.push(entry); continue; }
-    let result = await tgCall('sendMessage', { chat_id: entry.chatId, text: subscriberText, parse_mode: 'Markdown' });
-    // Telegram отдаёт 429 (Too Many Requests), если слать много сообщений подряд
-    // без пауз — один раз честно ждём подсказанное время и пробуем ещё раз,
-    // вместо того чтобы просто терять сообщение с ошибкой в логе.
-    if (result && result.ok === false && result.error_code === 429) {
-      const retryAfterSec = (result.parameters && result.parameters.retry_after) || 2;
-      await sleep(retryAfterSec * 1000);
-      result = await tgCall('sendMessage', { chat_id: entry.chatId, text: subscriberText, parse_mode: 'Markdown' });
-    }
+    let result = await sendTelegramTextSafe(entry.chatId, subscriberText);
     // Код 403 = пользователь заблокировал бота — удаляем такого подписчика,
     // как это уже делается для "умерших" web push подписок (404/410).
     if (result === null) { /* сетевая/временная ошибка — не удаляем, оставляем как есть */ stillValid.push(entry); }
@@ -1290,6 +1322,16 @@ const TRAGEDY_NARRATIVE_RE = /(страшная трагеди\w*|вся обл�
 // хотя к Белгороду конкретно она может вообще не иметь отношения.
 const MOD_DAILY_DIGEST_RE = /(—\s*минобороны\s+рф|минобороны\s+рф\.?\s*$|над\s+регион\S*\s+рф|за\s+(день|ночь|сутки)\s+сби\S*\s+\d+)/i;
 
+// Новости про суд/штрафы за МОШЕННИЧЕСТВО с инсценировкой атак — например
+// «Крупные штрафы — за инсценировку последствий атаки со стороны ВСУ и
+// попытку получить компенсации. Летом 2025 года двое жителей... специально
+// повредили... и обратились... чтобы компенсировать ущерб от ЯКОБЫ удара
+// вражеского беспилотника». Формально текст содержит "атаки"/"беспилотника"
+// и раньше матчил DIRECT_THREAT_RE как настоящую угрозу — а по сути это
+// ретроспективная (прошедшее время, конкретные даты) судебная новость о
+// том, что удара вообще НЕ было, его подделали ради компенсации.
+const FRAUD_STAGED_RE = /(инсценировк\S*|инсценирова\S*|специально\s+повредил\S*|обманным\s+путём|якобы\s+удар\S*|мошенничеств\S*[^.!?\n]{0,25}(атак|беспилотник|бпла|дрон))/i;
+
 function classify(text) {
   const lower = text.toLowerCase();
   if (NEWS_RECAP_RE.test(lower)) return { t: 'other', i: '📰', tag: 'Новостная сводка' };
@@ -1298,6 +1340,7 @@ function classify(text) {
   if (CASUALTY_NEWS_RE.test(lower)) return { t: 'other', i: '📰', tag: 'Сводка о последствиях' };
   if (TRAGEDY_NARRATIVE_RE.test(lower)) return { t: 'other', i: '📰', tag: 'Сводка о последствиях' };
   if (MOD_DAILY_DIGEST_RE.test(lower)) return { t: 'other', i: '📰', tag: 'Сводка Минобороны' };
+  if (FRAUD_STAGED_RE.test(lower)) return { t: 'other', i: '📰', tag: 'Судебная новость' };
 
   if (/отбой/.test(lower)) return { t: 'cancel', i: '✅', tag: 'Отбой / отмена' };
 
@@ -2017,6 +2060,10 @@ app.post('/api/admin/settings', requireAdmin, (req, res) => {
       if (typeof spec.max === 'number' && num > spec.max) { rejected.push(`${key}: больше максимума (${spec.max})`); continue; }
       value = num;
     }
+    if (spec.validateMarkdown) {
+      const mdErrors = validateMarkdownBalance(value);
+      if (mdErrors.length) { rejected.push(`${key}: ${mdErrors.join('; ')}`); continue; }
+    }
     runtimeSettings[key] = value;
     changed = true;
   }
@@ -2029,6 +2076,19 @@ app.post('/api/admin/settings', requireAdmin, (req, res) => {
     type: s.type || 'string', min: s.min, max: s.max, step: s.step, multiline: !!s.multiline
   }));
   res.json({ ok: rejected.length === 0, rejected: rejected.length ? rejected : undefined, fields });
+});
+
+// Сам процесс себя "перезапустить" не может — рестарт делает внешний
+// супервизор (systemd-сервис из install.sh: Restart=always, поднимает через
+// 5 сек после любого выхода процесса; то же самое на Render/Railway и
+// подобных хостингах — падение процесса = автоматический перезапуск).
+// Поэтому здесь просто: ответить админке успехом, дать чуть-чуть времени,
+// чтобы ответ реально ушёл по сети, и завершить процесс — дальше это уже
+// не наша забота, супервизор поднимет заново.
+app.post('/api/admin/restart', requireAdmin, (req, res) => {
+  addLog('info', 'Перезапуск сервера запрошен из админки');
+  res.json({ ok: true, message: 'Перезапускаюсь…' });
+  setTimeout(() => process.exit(0), 300);
 });
 
 app.get('/api/admin/alarm-config', requireAdmin, (req, res) => {
