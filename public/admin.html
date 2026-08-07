@@ -395,6 +395,11 @@
       <div id="settingsFields">Загрузка…</div>
       <button class="btn" id="saveSettingsBtn" type="button" style="margin-top:12px;">💾 Сохранить</button>
     </div>
+    <div class="panel">
+      <h2>🔁 Перезапуск сервера</h2>
+      <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">На ~5–10 секунд сайт, лента и бот станут недоступны, пока сервер поднимается заново. Опрос каналов и рассылка возобновятся автоматически — ничего донастраивать не нужно. Использовать, если что-то зависло и не помогает ничего другое.</p>
+      <button class="quick-btn danger" id="restartServerBtn" type="button">🔁 Перезапустить сервер</button>
+    </div>
   </div>
 
   <!-- ===== Вкладка: Логи ===== -->
@@ -919,6 +924,22 @@ async function loadSettings() {
   }
 }
 
+async function restartServer() {
+  if (!confirm('Перезапустить сервер? На ~5-10 секунд сайт, лента и бот будут недоступны.')) return;
+  var btn = document.getElementById('restartServerBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Перезапускается…';
+  try {
+    await apiPost('/api/admin/restart', {});
+  } catch (err) {
+    // Запрос может оборваться сетевой ошибкой сам по себе — сервер отвечает
+    // и ТОЛЬКО ПОТОМ завершает процесс, но если соединение разорвётся на
+    // полпути, это ожидаемо, а не признак реальной проблемы.
+  }
+  toast('Сервер перезапускается — страница обновится сама через 8 секунд', 'ok');
+  setTimeout(function() { window.location.reload(); }, 8000);
+}
+
 async function saveSettings() {
   var inputs = document.querySelectorAll('#settingsFields [data-settings-key]');
   var body = {};
@@ -1063,6 +1084,7 @@ function initHandlers() {
   document.getElementById('newFilterWordInput').addEventListener('keydown', function(e) { if (e.key === 'Enter') addFilterWord(); });
   document.getElementById('saveAlarmBtn').addEventListener('click', saveAlarmConfig);
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
+  document.getElementById('restartServerBtn').addEventListener('click', restartServer);
   document.getElementById('refreshLogsBtn').addEventListener('click', loadLogs);
   document.querySelectorAll('[data-log-filter]').forEach(function(btn) {
     btn.addEventListener('click', function() {
